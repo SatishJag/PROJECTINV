@@ -9,6 +9,7 @@ interface SheetSpec {
 
 async function workbook(projectName: string, title: string, sheets: SheetSpec[]) {
   const wb = new ExcelJS.Workbook();
+  wb.created = wb.modified = new Date("2026-01-01T00:00:00Z");
   for (const s of sheets) {
     const ws = wb.addWorksheet(s.name);
     ws.addRow([title]);

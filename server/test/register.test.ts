@@ -56,8 +56,10 @@ describe("Procore structure sync", () => {
 
 describe("BOQ submission for Bangkok Central 1", () => {
   let rev: string;
+  let revA: Buffer;
   it("extracts every line and accounts for it", async () => {
-    const r = await upload(P["Bangkok Central 1"].project_id, "BC1_MEP_BOQ_RevA.xlsx", await bc1Boq(), { procoreDocumentId: "DOC-1", sourceRevision: "A" });
+    revA = await bc1Boq();
+    const r = await upload(P["Bangkok Central 1"].project_id, "BC1_MEP_BOQ_RevA.xlsx", revA, { procoreDocumentId: "DOC-1", sourceRevision: "A" });
     expect(r.status).toBe(200);
     rev = r.body.revisionId;
     expect(r.body.revision.declared_project_name).toBe("Bangkok Central 1");
@@ -105,7 +107,7 @@ describe("BOQ submission for Bangkok Central 1", () => {
   });
 
   it("does not duplicate quantities when the same revision is imported again", async () => {
-    const again = await upload(P["Bangkok Central 1"].project_id, "BC1_MEP_BOQ_RevA (copy).xlsx", await bc1Boq());
+    const again = await upload(P["Bangkok Central 1"].project_id, "BC1_MEP_BOQ_RevA (copy).xlsx", revA);
     expect(again.body).toMatchObject({ duplicate: true, revisionId: rev });
     const rows = await register(P["Bangkok Central 1"].project_id, "UPS");
     expect(rows.map((r) => Number(r.boq_quantity))).toEqual([800, 4]);
@@ -152,6 +154,10 @@ describe("BOQ submission for Bangkok Central 1", () => {
     const lines = await linesOf(r.body.revisionId);
     expect(line(lines, "3.1")).toMatchObject({ mapping_status: "split", mapping_basis: "resolution carried from the previous revision" });
     expect(line(lines, "4.1")).toMatchObject({ mapping_status: "mapped", work_package_name: "UPS" });
+    expect(line(lines, "E4")).toMatchObject({ mapping_status: "rejected", resolution_note: "carried from the previous revision: Civil scope, not equipment" });
+    expect(line(lines, "E5")).toMatchObject({ validation_status: "valid", mapping_status: "mapped", work_package_name: "Transformer" });
+    expect(line(lines, "2.3")).toMatchObject({ line_kind: "note" });
+    expect((await api("GET", `/api/boq/${r.body.revisionId}`)).body.reconciliation).toMatchObject({ unresolved: 0, invalid: 0, rejected: 1, accountedFor: true });
     const ups = await register(P["Bangkok Central 1"].project_id, "UPS");
     expect(Number(ups.find((x) => x.item_description === "Copper cable").boq_quantity)).toBe(900 + 300);
     // superseded revision lines cannot be edited
@@ -229,6 +235,9 @@ describe("Project separation", () => {
     expect((await db.query(`select count(*)::int as n from boq_document_revisions where project_id = $1`, [P["Bangkok Central 2"].project_id])).rows[0]!.n).toBe(1);
     const c = await api("POST", `/api/boq/${r.body.revisionId}/confirm-project`, { note: "LDC reused the BC2 template; uploaded in the BC4 Documents tool" });
     expect(c.body.reconciliation).toMatchObject({ published: 8, held: 2 });
+    const msgs: string[] = (await api("GET", `/api/boq/${r.body.revisionId}`)).body.revision.processing_messages;
+    expect(msgs.some((m) => m.includes("Nothing is published"))).toBe(false);
+    expect(msgs.some((m) => /^Project confirmed by .+: LDC reused the BC2 template/.test(m))).toBe(true);
     expect((await register(bc4)).length).toBeGreaterThan(0);
   });
 

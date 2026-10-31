@@ -68,8 +68,12 @@ interface LineRecord {
   quantity: string | null;
   uom_id: string | null;
   item_id: string | null;
+  raw_quantity: string | null;
   validation_status: string;
+  validation_messages: unknown;
   mapping_status: string;
+  resolution_note: string | null;
+  resolved_by: string | null;
   proposed_work_package_id: string | null;
   proposed_cost_assignment_id: string | null;
 }
@@ -269,6 +273,44 @@ async function carriedResolution(q: Queryable, prevRevisionId: string | null, li
   return { prev, allocs };
 }
 
+/**
+ * Re-applies a reviewer's rejection or extraction correction from the previous revision when the source line is
+ * unchanged (same sheet, code, description, specification, raw quantity and raw unit).
+ */
+async function carryLineDecisions(q: Queryable, prevRevisionId: string, line: LineRecord): Promise<LineRecord> {
+  if (line.line_kind !== "item") return line;
+  const p = (
+    await q.query<LineRecord>(
+      `select * from boq_lines where boq_revision_id = $1 and resolved_by is not null
+         and coalesce(sheet_name, '') = coalesce($2, '') and coalesce(raw_item_code, '') = coalesce($3, '') and coalesce(raw_description, '') = coalesce($4, '')
+         and coalesce(raw_specification, '') = coalesce($5, '') and coalesce(raw_quantity, '') = coalesce($6, '') and coalesce(raw_uom, '') = coalesce($7, '')
+       order by resolved_at desc limit 1`,
+      [prevRevisionId, line.sheet_name, line.raw_item_code, line.raw_description, line.raw_specification, line.raw_quantity, line.raw_uom],
+    )
+  ).rows[0];
+  if (!p) return line;
+  if (p.mapping_status === "rejected") {
+    return (
+      await q.query<LineRecord>(
+        `update boq_lines set mapping_status = 'rejected', resolution_note = $2, resolved_by = $3, resolved_at = now(), updated_at = now() where boq_line_id = $1 returning *`,
+        [line.boq_line_id, `carried from the previous revision: ${p.resolution_note ?? ""}`.trim(), p.resolved_by],
+      )
+    ).rows[0]!;
+  }
+  const num = (v: string | null) => (v === null ? null : Number(v));
+  const corrected = p.line_kind !== "item" || p.validation_status !== line.validation_status || num(p.quantity) !== num(line.quantity) || p.uom_id !== line.uom_id;
+  if (!corrected) return line;
+  return (
+    await q.query<LineRecord>(
+      `update boq_lines set line_kind = $2, quantity = $3, uom_id = $4, validation_status = $5, validation_messages = $6::jsonb,
+          mapping_status = case when $2 = 'item' then 'unmapped' else 'not_applicable' end,
+          resolution_note = 'correction carried from the previous revision', resolved_by = $7, resolved_at = now(), updated_at = now()
+       where boq_line_id = $1 returning *`,
+      [line.boq_line_id, p.line_kind, p.quantity, p.uom_id, p.validation_status, JSON.stringify(p.validation_messages ?? []), p.resolved_by],
+    )
+  ).rows[0]!;
+}
+
 /** Maps one item line and publishes it when it is valid, fully attributed and its revision is not held. */
 async function mapAndPublish(q: Queryable, organizationId: string, line: LineRecord, s: Structure, uoms: UomTable, held: boolean, prevRevisionId: string | null) {
   if (line.line_kind !== "item" || line.mapping_status === "rejected") return;
@@ -424,7 +466,10 @@ export async function submitBoq(db: Db, organizationId: string, input: SubmitInp
       if (kind === "heading") stack.push({ level, text: [r.itemCode, r.description].filter(Boolean).join(" "), id: ins.boq_line_id });
       lines.push(ins);
     }
-    for (const l of lines) await mapAndPublish(q, organizationId, l, structure, uoms, conflict, prev?.boq_revision_id ?? null);
+    for (const l of lines) {
+      const carried = prev ? await carryLineDecisions(q, prev.boq_revision_id, l) : l;
+      await mapAndPublish(q, organizationId, carried, structure, uoms, conflict, prev?.boq_revision_id ?? null);
+    }
     await audit(q, {
       organizationId,
       projectId: project.project_id,
@@ -546,7 +591,13 @@ export async function confirmProject(db: Db, organizationId: string, revisionId:
     )).rows[0];
     if (!rev) throw new InputError("BOQ revision not found", 404);
     if (!rev.project_conflict) return;
-    await q.query(`update boq_document_revisions set project_conflict = false, updated_at = now() where boq_revision_id = $1`, [revisionId]);
+    await q.query(
+      `update boq_document_revisions set project_conflict = false, updated_at = now(),
+          processing_messages = (select coalesce(jsonb_agg(m), '[]'::jsonb) from jsonb_array_elements(processing_messages) m where m #>> '{}' not like 'The document names project%')
+            || jsonb_build_array($2::text)
+       where boq_revision_id = $1`,
+      [revisionId, `Project confirmed by ${actor}: ${note.trim()}`],
+    );
     const s = await loadStructure(q, rev.project_id);
     const uoms = await loadUoms(q);
     const lines = (await q.query<LineRecord>(`select * from boq_lines where boq_revision_id = $1 and line_kind = 'item' and mapping_status in ('proposed', 'unmapped')`, [revisionId])).rows;
