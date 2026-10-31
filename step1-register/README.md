@@ -1,4 +1,6 @@
-# PROJECTINV — Project Inventory Register (Inventory Intelligence, Step 1)
+# Step 1 — Project Inventory Register (Inventory Intelligence)
+
+A standalone Node app in `step1-register/`, separate from the PCX app at the repo root (`backend/`, `web/`). Run every command below from this folder.
 
 Step 1 only: a reliable relationship between the **Procore project**, its **WBS work package** and **cost assignment**,
 and **every item extracted from the BOQ** the LDC submits. Done when you can select *Bangkok Central 1 → UPS* and see every
@@ -83,7 +85,7 @@ sandbox company `4283715`); without them the built-in demo company is used.
 ## Deploy (Railway + Supabase)
 
 1. Supabase: create a project; copy the Postgres connection string (session pooler URI).
-2. Railway: new service from this repo (root `/`); `railway.json` sets build `npm ci && npm run build`, start
+2. Railway: new service from this repo with **Root Directory `step1-register`**; `railway.json` sets build `npm ci && npm run build`, start
    `npm start`, health check `/api/health`.
 3. Variables: `DATABASE_URL`, `APP_PASSWORD`, and either `PROCORE_MODE=demo` or the Procore variables
    (`PROCORE_BASE_URL`, `PROCORE_COMPANY_ID`, `PROCORE_CLIENT_ID`, `PROCORE_CLIENT_SECRET`).
