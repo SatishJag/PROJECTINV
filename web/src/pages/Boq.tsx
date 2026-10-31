@@ -288,6 +288,7 @@ function RevisionDrawer({ id, onClose, onChange }: { id: string; onClose: () => 
                         <div className="small">{l.work_package_name}</div>
                       ) : null}
                       {l.mapping_basis ? <div className="muted small">{l.mapping_basis}</div> : null}
+                      {l.resolution_note ? <div className="muted small">{l.resolution_note}</div> : null}
                       <Messages list={l.validation_messages} />
                     </td>
                   </tr>
