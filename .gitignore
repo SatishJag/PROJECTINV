@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Runtime data (seed recreates it)
+backend/data/*.db
+backend/data/*.db-*
+backend/data/*.sqlite*
+
+# Node / build output
+node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Unrelated workspace folders
+Procurement Intelligence/
+wbs9-whatsapp-bot-main/
+Inv Intelligence/
+.docx-extract/
+Inventory Procore.docx
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
