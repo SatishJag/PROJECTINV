@@ -1,0 +1,21 @@
+# OS artifacts
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Local env / secrets - never commit
+.env
+.env.*
+*.env
+supabase/.temp/
+supabase/.branches/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.bak
+
+# Node tooling (future ingestion pipeline)
+node_modules/
+dist/
