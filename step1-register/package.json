@@ -1,0 +1,16 @@
+{
+  "name": "projectinv",
+  "private": true,
+  "workspaces": ["server", "web"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev:server": "npm run dev -w @projectinv/server",
+    "dev:web": "npm run dev -w @projectinv/web",
+    "build": "npm run build -w @projectinv/web && npm run build -w @projectinv/server",
+    "start": "npm start -w @projectinv/server",
+    "migrate": "npm run migrate -w @projectinv/server",
+    "test": "npm test -w @projectinv/server",
+    "typecheck": "npm run typecheck -w @projectinv/server && npm run typecheck -w @projectinv/web",
+    "samples": "npm run samples -w @projectinv/server"
+  }
+}
