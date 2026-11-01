@@ -29,8 +29,28 @@ There are three separate efforts. Know which one you are touching.
 
 - `feature/step1-foundation` was cut from the initial commit. **Never merge it into `main` as is**, because that would
   delete PCX. Cherry-pick or copy its files instead.
-- Still open (see the plan, §5): final repo layout (recommended: Step 1 at root, PCX to `legacy/pcx/`), the Supabase
-  project, Procore sandbox credentials and real BOQ samples. Don't decide these yourself. Ask.
+- Still open (see the plan, §5): final repo layout (recommended: Step 1 at root, PCX to `legacy/pcx/`), Procore sandbox credentials and real BOQ samples. Don't decide these yourself. Ask.
+
+### Platform (decided 1 Nov 2026): cloud-portable, Azure first
+
+Each client runs the product in **their own cloud account**. We build for Azure first; AWS follows behind the same
+interfaces. **Supabase is no longer the target platform.** It, or plain local Postgres, is only a development option.
+
+| Part | Azure (first) | AWS (later) |
+|---|---|---|
+| Database + vectors | Azure Database for PostgreSQL Flexible Server + `pgvector` | RDS / Aurora Postgres + `pgvector` |
+| Original BOQ files | Azure Blob Storage (`AzureBlobFileStore`), with lifecycle tiers | S3 (to add behind `FileStore`) |
+| App + extraction worker | Linux VM or container, managed identity | EC2 / container |
+| Sign-in | Microsoft Entra ID (OIDC) | Cognito / client SSO |
+| OCR | Azure AI Document Intelligence | Amazon Textract |
+
+- Code must stay plain Postgres + interfaces: no Supabase SDK or Supabase-only features in app code.
+- **Never store file bytes in Postgres.** Originals go through `FileStore` (`server/src/filestore.ts`). The database
+  keeps `storage_kind`, `storage_key` (`boq/<org>/<project>/<sha256>`), size and sha256.
+- On Azure, authenticate to Blob with managed identity (`AZURE_STORAGE_ACCOUNT_URL`). Connection strings are for
+  Azurite and local development only.
+- The migrations folder is still called `supabase/migrations`, but the SQL must run on plain Postgres (Azure). The
+  `auth.uid()` shim in 0002 reads the user id the API sets per request, whatever the identity provider.
 
 ### Current feature: automatic BOQ capture from Procore Documents
 
@@ -92,7 +112,7 @@ and handbooks have **tables only, with no behaviour**.
 ## 5. Migrations
 
 - They live in `supabase/migrations/NNNN_name.sql`. They apply strictly in order, and each must apply cleanly on plain
-  Postgres 16+ (with the local `auth` shim) and on Supabase.
+  Postgres 16+ (with the local `auth` shim) and on Azure Database for PostgreSQL.
 - **Before the first hosted deploy:** fix the baseline files (0001–0008) in place.
   **After the first hosted deploy:** never edit an applied migration. Add a new one.
 - Evolve in this order: add the column or table → update behaviour → backfill from evidence → validate → tighten the
@@ -122,6 +142,7 @@ npm run build
 PROCORE_MODE=demo npm start          # http://localhost:4100, demo Bangkok Central company
 npm run dev:server / npm run dev:web # API :4100, Vite :5173
 npm run samples                      # regenerate sample BOQs in samples/
+npm run files:migrate                # move originals still stored in Postgres into the file store
 ```
 
 Configuration lives in `.env.example`. Without `PROCORE_CLIENT_ID`/`SECRET`, the demo Procore adapter is used.
@@ -166,7 +187,7 @@ Each Step 1 change must keep these true. Encode them as executable tests, not co
   changed SQL. Report failures; never skip or disable a test to get green.
 - Keep changes scoped to Step 1. Don't build behaviour on dormant tables.
 - Don't re-key any entity to a Procore ID, serial or supplier code. Don't sum quantities across revisions.
-- Ask the owner before you delete code, change the repo layout, create cloud resources (Supabase, Railway) or call a
+- Ask the owner before you delete code, change the repo layout, create cloud resources (Azure, AWS, Supabase, Railway) or call a
   live Procore tenant.
 - Write plainly in docs and comments. Keep `docs/phase1-step1-action-plan.md` current when a step's status changes.
 

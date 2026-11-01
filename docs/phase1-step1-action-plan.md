@@ -2,7 +2,8 @@
 
 Date: 1 Nov 2026. Goal of Step 1 (from `feature/step1-foundation/docs/step1-foundation-plan.md`):
 select **Bangkok Central 1 → UPS** and see every BOQ-derived item with specification, UOM, quantity,
-cost assignment and source evidence, with Bangkok Central 2 kept separate. Platform: **Supabase Postgres**.
+cost assignment and source evidence, with Bangkok Central 2 kept separate. Platform: **cloud-portable, Azure first**
+(decided 1 Nov 2026, replacing Supabase; see `docs/architecture-document-store-and-ai.md`).
 
 ---
 
@@ -57,11 +58,11 @@ contract that Step 2+ depends on ("full schema up front, never re-key"). Merging
 | 1 | **Fix the foundation migrations**: add the composite unique keys (`(project_id, <pk>)`) to every parent table; drop `unique(project_id, work_package_id)` on `cost_assignments`; add a Supabase `auth` shim for local tests | 0001–0008 apply cleanly to plain Postgres 16/17 and to a Supabase branch |
 | 2 | **Make A1–A10 executable**: seed BC1/BC2, two users, set JWT claims, assert with `DO` blocks or pgTAP; run in CI | `psql -f tests/acceptance_step1.sql` fails loudly on any broken rule |
 | 3 | **Port PR #1's server to the canonical schema**: write exceptions to `mapping_exceptions`, reconciliation counts to `ingestion_runs`, segments to `cost_code_segments`; keep the parse → classify → validate → map → publish pipeline | PR #1's 18 tests pass against migrations 0001–0008 |
-| 4 | **Apply RLS to app traffic**: replace the shared password with Supabase Auth. The API forwards the user's JWT (`set local role authenticated` + claims); only ingestion workers use `service_role`. Add write policies and deny DELETE | The RLS test runs through the HTTP API, not just raw SQL |
-| 5 | **Provision Supabase**: new project (e.g. `projectinv-dev`, Singapore/Sydney region), apply migrations, seed org + Bangkok Central 1–4 + memberships | Hosted DB matches `supabase db diff` = empty |
+| 4 | **Apply RLS to app traffic**: replace the shared password with Microsoft Entra ID (OIDC) sign-in. The API forwards the user's JWT (`set local role authenticated` + claims); only ingestion workers use `service_role`. Add write policies and deny DELETE | The RLS test runs through the HTTP API, not just raw SQL |
+| 5 | **Provision Azure** (Terraform): resource group, Postgres Flexible Server + pgvector, Blob storage with lifecycle tiers, Linux VM with managed identity; apply migrations, seed org + Bangkok Central 1–4 + memberships | Hosted DB matches `supabase db diff` = empty |
 | 6 | **Procore sandbox discovery**: with real sandbox credentials, verify WBS segments, budget codes, the Documents download, and permissions; record the actual field names | Live sync runs twice with no duplicates; one BOQ imported from Procore Documents |
 | 7 | **UAT on the definition of done**: real LDC BOQs (Excel + PDF) for BC1/BC2, the exception queue worked through by an estimator | BC1 → UPS demo signed off; A1–A10 green on hosted DB |
-| 8 | **Deploy** (Railway per PR #1, or Supabase + Vercel) with env/secrets documented | Shareable URL behind Supabase Auth |
+| 8 | **Deploy** on Azure with env/secrets in Key Vault | Shareable URL behind Entra ID sign-in |
 
 Out of scope for Step 1 (dormant tables exist, no behaviour): commitments / ordered quantity, physical units,
 assemblies, test/failure, reservations, arrival, handbooks. `ordered_quantity` stays NULL.
@@ -76,11 +77,13 @@ be billable). 6 needs Procore sandbox credentials. 7 needs real BOQ files.
 | 1 Nov 2026 | PR #1 merged into the working branch (`step1-register/`, alongside PCX) |
 | 1 Nov 2026 | **Automatic BOQ capture from Procore Documents.** A BOQ stored in the project's "BOQ" folder (or a chosen folder) is captured into the register via a webhook plus a periodic catch-up scan. Covers new versions, Rev B files beside Rev A, duplicates, unreadable files and temporary errors. 15 new tests (33 total); verified in the browser on demo data. Still needs Procore sandbox confirmation (step 6) |
 
+| 1 Nov 2026 | **Platform decision: Azure first, cloud-portable.** BOQ originals moved out of Postgres into a file store: Azure Blob (managed identity) or a local folder for development; migration 0004; `npm run files:migrate` moves older files. Tested against Azurite (44 tests) and run end to end on Postgres 16 + Azurite |
+
 ## 5. Decisions needed from the owner
 
 1. **Repo layout** — (a) make the Step 1 app the repo root and move PCX to `legacy/pcx/` *(recommended)*, or (b) keep
    `step1-register/` next to PCX as PR #1 does.
-2. **Supabase** — OK to create a new project for PROJECTINV? Which region?
+2. ~~Supabase~~ **Decided 1 Nov: Azure first, cloud-portable.** Still needed: an Azure subscription to deploy into, and the region (data residency).
 3. **Procore** — sandbox client id/secret and company id for discovery (step 6).
-4. **Auth** — Supabase Auth email magic-link is enough for Step 1, or is Procore SSO / embedded-app launch needed now?
+4. **Auth** — Entra ID for staff; is Procore login / embedded-app launch also needed now? How do LDC users sign in, if at all?
 5. **Sample data** — real LDC BOQ files for BC1/BC2 to replace the generated samples.

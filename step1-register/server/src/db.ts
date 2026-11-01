@@ -17,7 +17,12 @@ export interface Db extends Queryable {
 pg.types.setTypeParser(20, (v) => Number(v)); // int8 (counts, Procore ids)
 
 export function pgDb(connectionString: string): Db {
-  const ssl = /supabase\.(co|com)|sslmode=require/.test(connectionString) ? { rejectUnauthorized: false } : undefined;
+  // Azure Database for PostgreSQL requires TLS; its certificates chain to public roots, so they are verified.
+  const ssl = /\.postgres\.database\.azure\.com/.test(connectionString)
+    ? { rejectUnauthorized: true }
+    : /supabase\.(co|com)|sslmode=require/.test(connectionString)
+      ? { rejectUnauthorized: false }
+      : undefined;
   const pool = new pg.Pool({ connectionString, ssl, max: 10 });
   return {
     query: (text, params) => pool.query(text, params as any[]) as any,

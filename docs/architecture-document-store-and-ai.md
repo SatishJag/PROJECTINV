@@ -1,6 +1,8 @@
 # Architecture proposal: BOQ document store, AI search and linking
 
-Status: **proposal for owner decision** (1 Nov 2026)
+Status: **decided 1 Nov 2026: cloud-portable, Azure first.** Each client runs in their own cloud account: Azure
+(Postgres Flexible Server + pgvector, Blob Storage, Entra ID, Document Intelligence) first, AWS behind the same
+interfaces later. Supabase was dropped as the target platform. Step 1 (file store) is done.
 
 ## Problem
 
@@ -95,7 +97,13 @@ next to Postgres, never the place where links live.
 5. **AI proposals** in the exception queue, with score, evidence and accept/reject. Measure precision before trusting it.
 6. **Optional**: an Azure AI Search portal for document-wide search.
 
-## Decisions needed
+## Decisions (1 Nov 2026)
+
+- Hosting: **Azure first**, cloud-portable; not Supabase.
+- Still open: the Azure subscription and region, and the embedding and OCR providers (default: Azure OpenAI +
+  Document Intelligence).
+
+## Original open questions
 
 1. **Hosting**: stay on Supabase (approved 31 Oct) or move to Azure (PostgreSQL Flexible Server + Blob + AI services)?
    The design is the same; only the providers change.

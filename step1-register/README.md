@@ -123,7 +123,37 @@ Tests (in-process Postgres via PGlite): `npm test`. Type check: `npm run typeche
 See `.env.example`. Live Procore needs `PROCORE_CLIENT_ID` / `PROCORE_CLIENT_SECRET` (the same DMSA app as AdvaPay,
 sandbox company `4283715`); without them the built-in demo company is used.
 
-## Deploy (Railway + Supabase)
+## Where the original BOQ files are kept
+
+Original files are **not** stored in Postgres. The database keeps each revision's `storage_kind`, `storage_key`
+(`boq/<organization>/<project>/<sha256>`), size and sha256. The bytes live in a file store (`server/src/filestore.ts`):
+
+- **Azure Blob Storage** (production). Set `AZURE_STORAGE_ACCOUNT_URL`; the server authenticates with its managed
+  identity, so no keys are needed. Files are written once, and their sha256 is checked when read back. Older files
+  should move to cheaper tiers through the storage account's lifecycle policy (e.g. Cool after 30 days without
+  access, Cold or Archive later).
+- **Azurite**, for local development with Azure behaviour: `npx azurite-blob --inMemoryPersistence`, then set
+  `AZURE_STORAGE_CONNECTION_STRING` to the Azurite connection string. The tests start Azurite themselves.
+- **A local folder** (`FILE_STORE_DIR`, default `data/files`) when neither is set. Development only.
+
+Databases created before migration `0004` hold originals in `file_content`. Run `npm run files:migrate` with
+`DATABASE_URL` and the file-store settings to move them out. It is safe to repeat.
+
+## Deploy on Azure (target platform)
+
+Each client runs in their own Azure subscription. Outline (Terraform templates to follow):
+
+1. **Azure Database for PostgreSQL Flexible Server** (Postgres 16). Allow the `vector` extension for the later AI
+   step. `DATABASE_URL=...postgres.database.azure.com...?sslmode=require`.
+2. **Storage account** with a private container `boq-originals`. Turn on last-access tracking and a lifecycle rule
+   that moves blobs to Cool, then Cold, when unused.
+3. **Linux VM** (or container) with a **system-assigned managed identity**, granted *Storage Blob Data Contributor* on
+   the storage account. Set `AZURE_STORAGE_ACCOUNT_URL=https://<account>.blob.core.windows.net`.
+4. Node 22; `npm ci && npm run build && npm start` under systemd. Secrets (`DATABASE_URL`, `PROCORE_*`) come from
+   Key Vault or the service environment.
+5. Point the Procore webhook at `https://<host>/api/procore/webhooks` (see above).
+
+## Deploy (Railway + Supabase): demo only
 
 1. Supabase: create a project; copy the Postgres connection string (session pooler URI).
 2. Railway: new service from this repo with **Root Directory `step1-register`**; `railway.json` sets build `npm ci && npm run build`, start

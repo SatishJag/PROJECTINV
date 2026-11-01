@@ -6,6 +6,7 @@ import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { z } from "zod";
 import type { Db } from "./db.js";
+import { FileStoreError, type FileStore } from "./filestore.js";
 import { DemoProcoreAdapter, type ProcoreAdapter } from "./procore.js";
 import { audit, syncFromProcore } from "./sync.js";
 import {
@@ -24,6 +25,8 @@ import { confirmProject, correctLine, InputError, reconciliation, rejectLine, re
 
 export interface AppDeps {
   db: Db;
+  /** Where original BOQ files are kept (Azure Blob in production). */
+  files: FileStore;
   procore: ProcoreAdapter;
   organizationId: string;
   appPassword?: string | null;
@@ -35,7 +38,7 @@ export interface AppDeps {
 const uuid = z.string().uuid();
 
 export async function buildApp(deps: AppDeps) {
-  const { db, procore, organizationId } = deps;
+  const { db, procore, organizationId, files } = deps;
   const app = Fastify({ logger: false, bodyLimit: 60 * 1024 * 1024 });
   await app.register(multipart, { limits: { fileSize: 50 * 1024 * 1024, files: 1 } });
 
@@ -49,6 +52,10 @@ export async function buildApp(deps: AppDeps) {
   app.setErrorHandler((err: any, _req, reply) => {
     if (err instanceof InputError) return reply.code(err.status).send({ error: err.message });
     if (err instanceof WebhookRejected) return reply.code(err.status).send({ error: err.message });
+    if (err instanceof FileStoreError) {
+      console.error(err);
+      return reply.code(502).send({ error: err.message });
+    }
     if (err instanceof z.ZodError) return reply.code(400).send({ error: err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
     if (err?.code && /^(23|22|P0)/.test(String(err.code))) return reply.code(409).send({ error: err.message });
     if (err?.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({ error: err.message });
@@ -191,7 +198,7 @@ export async function buildApp(deps: AppDeps) {
   });
 
   const submit = async (req: FastifyRequest, projectId: string, f: { fileName: string; mimeType: string | null; content: Buffer }, fields: Record<string, string | undefined>, sourceTool: "upload" | "procore_documents") => {
-    const result = await submitBoq(db, organizationId, {
+    const result = await submitBoq(db, files, organizationId, {
       projectId,
       ...f,
       sourceTool,
@@ -270,10 +277,18 @@ export async function buildApp(deps: AppDeps) {
 
   app.get<{ Params: { id: string } }>("/api/boq/:id/file", async (req, reply: FastifyReply) => {
     const rev = await revisionOr404(req.params.id);
-    const f = (await db.query(`select file_content from boq_document_revisions where boq_revision_id = $1`, [rev.boq_revision_id])).rows[0];
+    const f = (
+      await db.query<{ storage_kind: string | null; storage_key: string | null; file_content: Buffer | null }>(
+        `select storage_kind, storage_key, case when storage_key is null then file_content end as file_content from boq_document_revisions where boq_revision_id = $1`,
+        [rev.boq_revision_id],
+      )
+    ).rows[0]!;
     reply.header("content-type", rev.mime_type || "application/octet-stream");
-    reply.header("content-disposition", `attachment; filename="${String(rev.file_name).replace(/"/g, "")}"`);
-    return reply.send(Buffer.from(f!.file_content));
+    reply.header("content-disposition", `attachment; filename="${String(rev.file_name).replace(/["\\\r\n]/g, "")}"`);
+    if (!f.storage_key) return reply.send(Buffer.from(f.file_content!)); // stored before the file store existed
+    if (f.storage_kind !== files.kind) throw new FileStoreError(`This file is in the "${f.storage_kind}" store, but this server uses "${files.kind}"`);
+    if (rev.file_size) reply.header("content-length", String(rev.file_size));
+    return reply.send(await files.open(f.storage_key));
   });
 
   app.post<{ Params: { id: string } }>("/api/boq/:id/confirm-project", async (req) => {
@@ -354,7 +369,7 @@ export async function buildApp(deps: AppDeps) {
   });
 
   // ---------------------------------------------------------------- automatic capture from Procore Documents
-  const capture: CaptureContext = { db, procore, organizationId };
+  const capture: CaptureContext = { db, procore, organizationId, files };
 
   /** Procore webhook receiver: stored, acknowledged at once, processed in the background. */
   app.post("/api/procore/webhooks", async (req, reply) => {

@@ -1,5 +1,9 @@
 import { beforeAll, describe, expect, it } from "vitest";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs";
 import { buildApp } from "../src/app.js";
+import { LocalFileStore } from "../src/filestore.js";
 import { drainCaptureWork, scanAllProjects } from "../src/capture.js";
 import { migrate, pgliteDb, type Db } from "../src/db.js";
 import { DemoProcoreAdapter, DEMO_PROJECTS } from "../src/procore.js";
@@ -8,6 +12,7 @@ import { bc1Boq, bc2Boq, textPdf } from "../scripts/samples.js";
 
 const SECRET = "test-webhook-secret";
 let db: Db;
+const files = new LocalFileStore(fs.mkdtempSync(path.join(os.tmpdir(), "pir-files-")));
 let app: Awaited<ReturnType<typeof buildApp>>;
 let procore: DemoProcoreAdapter;
 let orgId: string;
@@ -48,7 +53,7 @@ beforeAll(async () => {
   orgId = await ensureOrganization(db, "Capture test org");
   procore = new DemoProcoreAdapter();
   await syncFromProcore(db, procore, orgId, "test");
-  app = await buildApp({ db, procore, organizationId: orgId, webDist: "/nonexistent", webhookSecret: SECRET });
+  app = await buildApp({ db, files, procore, organizationId: orgId, webDist: "/nonexistent", webhookSecret: SECRET });
   for (const p of (await api("GET", "/api/projects")).body) P[p.project_name] = p;
 }, 60_000);
 
@@ -120,7 +125,7 @@ describe("BOQ stored in Procore Documents is captured automatically", () => {
   it("catches a BOQ whose webhook never arrived on the periodic scan", async () => {
     await store("Bangkok Central 3", "BOQ/Electrical", "BC3_UPS_BOQ.xlsx", bc1Boq({ projectName: "Bangkok Central 3" }));
     expect(await captures("Bangkok Central 3")).toHaveLength(0);
-    await scanAllProjects({ db, procore, organizationId: orgId });
+    await scanAllProjects({ db, files, procore, organizationId: orgId });
     const c = await captures("Bangkok Central 3");
     expect(c).toHaveLength(1);
     expect(c[0]).toMatchObject({ status: "captured", detected_via: "scan", folder_path: "BOQ/Electrical" });
@@ -152,7 +157,7 @@ describe("BOQ stored in Procore Documents is captured automatically", () => {
     await deliver(webhook("Bangkok Central 4", s.fileId));
     let c = (await captures("Bangkok Central 4")).find((x) => x.procore_file_id === s.fileId);
     expect(c).toMatchObject({ status: "retry", attempts: 1 });
-    await scanAllProjects({ db, procore, organizationId: orgId });
+    await scanAllProjects({ db, files, procore, organizationId: orgId });
     c = (await captures("Bangkok Central 4")).find((x) => x.procore_file_id === s.fileId);
     expect(c).toMatchObject({ status: "captured", attempts: 2 });
   });
@@ -178,7 +183,7 @@ describe("Procore webhook receiver", () => {
   });
 
   it("refuses all deliveries when no secret is configured", async () => {
-    const open = await buildApp({ db, procore, organizationId: orgId, webDist: "/nonexistent" });
+    const open = await buildApp({ db, files, procore, organizationId: orgId, webDist: "/nonexistent" });
     const r = await open.inject({ method: "POST", url: "/api/procore/webhooks", payload: webhook("Bangkok Central 1", "1"), headers: { authorization: "Bearer " } });
     expect(r.statusCode).toBe(503);
   });
@@ -191,7 +196,7 @@ describe("Procore webhook receiver", () => {
   });
 
   it("is reachable when the app password is set (Procore cannot sign in)", async () => {
-    const locked = await buildApp({ db, procore, organizationId: orgId, webDist: "/nonexistent", appPassword: "pw", webhookSecret: SECRET });
+    const locked = await buildApp({ db, files, procore, organizationId: orgId, webDist: "/nonexistent", appPassword: "pw", webhookSecret: SECRET });
     const r = await locked.inject({ method: "POST", url: "/api/procore/webhooks", payload: webhook("Bangkok Central 1", "1", "update", "Documents", "01J-LOCKED"), headers: { authorization: `Bearer ${SECRET}` } });
     expect(r.statusCode).toBe(202);
     await drainCaptureWork();

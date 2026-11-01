@@ -1,11 +1,16 @@
 import { beforeAll, describe, expect, it } from "vitest";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs";
 import { buildApp } from "../src/app.js";
+import { LocalFileStore } from "../src/filestore.js";
 import { migrate, pgliteDb, type Db } from "../src/db.js";
 import { DemoProcoreAdapter } from "../src/procore.js";
 import { ensureOrganization, syncFromProcore } from "../src/sync.js";
 import { bc1Boq, bc2Boq, bc3PdfBoq } from "../scripts/samples.js";
 
 let db: Db;
+const files = new LocalFileStore(fs.mkdtempSync(path.join(os.tmpdir(), "pir-files-")));
 let app: Awaited<ReturnType<typeof buildApp>>;
 let orgId: string;
 const P: Record<string, any> = {};
@@ -36,7 +41,7 @@ beforeAll(async () => {
   orgId = await ensureOrganization(db, "Test org");
   const procore = new DemoProcoreAdapter();
   await syncFromProcore(db, procore, orgId, "test");
-  app = await buildApp({ db, procore, organizationId: orgId, webDist: "/nonexistent" });
+  app = await buildApp({ db, files, procore, organizationId: orgId, webDist: "/nonexistent" });
   for (const p of (await api("GET", "/api/projects")).body) P[p.project_name] = p;
 }, 60_000);
 

@@ -14,12 +14,14 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Db, Queryable } from "./db.js";
+import type { FileStore } from "./filestore.js";
 import { defaultDocumentKey, InputError, submitBoq } from "./boq/ingest.js";
 import { ProcoreError, type ProcoreAdapter, type ProcoreFileEntry } from "./procore.js";
 import { audit, syncFromProcore } from "./sync.js";
 
 export interface CaptureContext {
   db: Db;
+  files: FileStore;
   procore: ProcoreAdapter;
   organizationId: string;
 }
@@ -164,7 +166,7 @@ async function documentKeyFor(q: Queryable, projectId: string, f: FileInFolder) 
 const isTemporary = (e: unknown) => e instanceof ProcoreError && (e.status === null || e.status === 429 || e.status >= 500);
 
 async function captureFile(ctx: CaptureContext, project: { project_id: string; procore_project_id: number }, f: FileInFolder, via: string, r: ScanResult) {
-  const { db, procore, organizationId } = ctx;
+  const { db, procore, organizationId, files } = ctx;
   const version = f.version ?? f.updatedAt ?? "unversioned";
   const existing = (
     await db.query<{ status: string; attempts: number }>(
@@ -197,7 +199,7 @@ async function captureFile(ctx: CaptureContext, project: { project_id: string; p
   try {
     const file = await procore.downloadDocument(project.procore_project_id, f.id);
     const documentKey = await documentKeyFor(db, project.project_id, f);
-    const res = await submitBoq(db, organizationId, {
+    const res = await submitBoq(db, files, organizationId, {
       projectId: project.project_id,
       fileName: file.fileName || f.name,
       mimeType: file.mimeType,

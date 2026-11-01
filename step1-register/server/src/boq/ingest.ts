@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Db, Queryable } from "../db.js";
+import { boqFileKey, type FileStore } from "../filestore.js";
 import { audit } from "../sync.js";
 import { detectFormat, parseCsv, parsePdf, parseXlsx, UnsupportedDocument, type ParsedDocument, type SourceRow } from "./parse.js";
 import { classify, compactCode, containsPhrase, headingLevel, itemMatchKey, parseQuantity, sameProjectName, UomTable, type Uom } from "./normalize.js";
@@ -348,7 +349,7 @@ async function mapAndPublish(q: Queryable, organizationId: string, line: LineRec
 }
 
 /** Receives a BOQ file for a project, extracts and validates every line, maps and publishes what is attributable. */
-export async function submitBoq(db: Db, organizationId: string, input: SubmitInput): Promise<SubmitResult> {
+export async function submitBoq(db: Db, files: FileStore, organizationId: string, input: SubmitInput): Promise<SubmitResult> {
   const project = (
     await db.query<{ project_id: string; project_name: string; procore_company_id: number | null; procore_project_id: number | null }>(
       `select project_id, project_name, procore_company_id, procore_project_id from projects where project_id = $1 and organization_id = $2`,
@@ -387,6 +388,11 @@ export async function submitBoq(db: Db, organizationId: string, input: SubmitInp
   if (conflict) messages.unshift(`The document names project "${parsed.declaredProjectName}" but was submitted under "${project.project_name}". Nothing is published until the project is confirmed.`);
   if (!parsed.rows.length) messages.push("No BOQ lines were found");
 
+  // The original goes to the file store before anything is recorded. The key is content-addressed, so a retry after a
+  // failure further down simply finds the file already there.
+  const storageKey = boqFileKey(organizationId, project.project_id, hash);
+  await files.put(storageKey, input.content, { sha256: hash, contentType: input.mimeType, fileName: input.fileName });
+
   return db.tx(async (q) => {
     const prev = (
       await q.query<{ boq_revision_id: string }>(`select boq_revision_id from boq_document_revisions where project_id = $1 and document_key = $2 and document_status = 'current'`, [
@@ -398,9 +404,9 @@ export async function submitBoq(db: Db, organizationId: string, input: SubmitInp
     const rev = (
       await q.query<{ boq_revision_id: string }>(
         `insert into boq_document_revisions (organization_id, project_id, document_key, source_tool, procore_company_id, procore_project_id, procore_document_id,
-            source_revision, file_name, mime_type, file_hash, file_size, file_content, declared_project_name, project_conflict, submitted_by,
+            source_revision, file_name, mime_type, file_hash, file_size, storage_kind, storage_key, declared_project_name, project_conflict, submitted_by,
             processing_status, processing_messages, supersedes_revision_id)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'extracted', $17, $18) returning boq_revision_id`,
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'extracted', $18, $19) returning boq_revision_id`,
         [
           organizationId,
           project.project_id,
@@ -414,7 +420,8 @@ export async function submitBoq(db: Db, organizationId: string, input: SubmitInp
           input.mimeType,
           hash,
           input.content.length,
-          input.content,
+          files.kind,
+          storageKey,
           parsed.declaredProjectName,
           conflict,
           input.submittedBy,
