@@ -2,6 +2,7 @@ import { buildApp } from "./app.js";
 import { migrate, pgDb, pgliteDb } from "./db.js";
 import { procoreFromEnv } from "./procore.js";
 import { ensureOrganization, syncFromProcore } from "./sync.js";
+import { startCapturePoller } from "./capture.js";
 
 const env = process.env;
 const log = (m: string) => console.log(`[projectinv] ${m}`);
@@ -19,7 +20,12 @@ if (procore.mode === "demo" || env.SYNC_ON_START === "true") {
   });
   if (r) log(`synced ${r.projects.length} projects`);
 }
-const app = await buildApp({ db, procore, organizationId, appPassword: env.APP_PASSWORD || null });
+const app = await buildApp({ db, procore, organizationId, appPassword: env.APP_PASSWORD || null, webhookSecret: env.PROCORE_WEBHOOK_SECRET || null });
+// Catch-up scan of every project's watched Procore Documents folder (covers missed or unconfigured webhooks).
+const scanMinutes = Number(env.PROCORE_SCAN_MINUTES ?? (procore.mode === "live" ? 15 : 0));
+startCapturePoller({ db, procore, organizationId }, scanMinutes, log);
+log(scanMinutes > 0 ? `Procore Documents scan every ${scanMinutes} min` : "Procore Documents periodic scan off (PROCORE_SCAN_MINUTES)");
+if (procore.mode === "live" && !env.PROCORE_WEBHOOK_SECRET) log("PROCORE_WEBHOOK_SECRET not set: Procore webhooks are refused; BOQs are captured by the periodic scan only");
 const port = Number(env.PORT ?? 4100);
 await app.listen({ port, host: "0.0.0.0" });
 log(`listening on :${port}`);

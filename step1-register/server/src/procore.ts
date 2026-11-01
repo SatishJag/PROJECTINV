@@ -36,13 +36,33 @@ export interface ProcoreFile {
   revision: string | null;
   content: Buffer;
 }
+/** A file in a Documents folder listing; `version` is the latest file version number. */
+export interface ProcoreFileEntry {
+  id: string;
+  name: string;
+  version: string | null;
+  updatedAt: string | null;
+}
+/** One Documents folder with its direct subfolders and files. `folderId` null = the project's root folder. */
+export interface ProcoreFolder {
+  id: string;
+  name: string;
+  folders: { id: string; name: string }[];
+  files: ProcoreFileEntry[];
+}
 export interface ProcoreAdapter {
   readonly mode: "live" | "demo";
   readonly companyId: number;
   listProjects(): Promise<ProcoreProject[]>;
   getWbs(projectId: number): Promise<ProcoreWbs>;
+  getFolder(projectId: number, folderId: string | null): Promise<ProcoreFolder>;
   downloadDocument(projectId: number, documentId: string): Promise<ProcoreFile>;
 }
+
+/** Procore's root folder also lists system folders that never hold BOQs. */
+const SYSTEM_FOLDER = /^(recycle bin|trash)$/i;
+const latestVersion = (versions: unknown) =>
+  ((Array.isArray(versions) ? versions : []) as Record<string, any>[]).slice().sort((a, b) => Number(b.number ?? 0) - Number(a.number ?? 0))[0];
 
 export class ProcoreError extends Error {
   constructor(
@@ -204,11 +224,31 @@ export class LiveProcoreAdapter implements ProcoreAdapter {
     return { costCodes, budgetCodes };
   }
 
+  /**
+   * Documents tool folder: GET /rest/v1.0/folders (root) or /rest/v1.0/folders/{id}, with project_id. Nested folders
+   * come back without their contents, so callers walk the tree one folder at a time. Not yet verified live.
+   */
+  async getFolder(projectId: number, folderId: string | null): Promise<ProcoreFolder> {
+    const path = folderId ? `/rest/v1.0/folders/${encodeURIComponent(folderId)}` : "/rest/v1.0/folders";
+    const f = await this.get(path, { project_id: projectId });
+    const live = (x: Record<string, any>) => !x.is_deleted && !x.is_recycle_bin && !SYSTEM_FOLDER.test(String(x.name ?? ""));
+    return {
+      id: String(f?.id ?? folderId ?? "root"),
+      name: String(f?.name ?? ""),
+      folders: ((f?.folders ?? []) as Record<string, any>[]).filter(live).map((x) => ({ id: String(x.id), name: String(x.name ?? x.id) })),
+      files: ((f?.files ?? []) as Record<string, any>[])
+        .filter((x) => !x.is_deleted)
+        .map((x) => {
+          const v = latestVersion(x.file_versions);
+          return { id: String(x.id), name: String(x.name ?? x.id), version: str(v?.number) ?? str(v?.id), updatedAt: str(x.updated_at ?? v?.created_at) };
+        }),
+    };
+  }
+
   /** Documents tool file (GET /rest/v1.0/files/{id}); the latest file version is downloaded. Not yet verified live. */
   async downloadDocument(projectId: number, documentId: string): Promise<ProcoreFile> {
     const file = await this.get(`/rest/v1.0/files/${encodeURIComponent(documentId)}`, { project_id: projectId });
-    const versions = ((file?.file_versions ?? []) as Record<string, any>[]).slice().sort((a, b) => Number(b.number ?? 0) - Number(a.number ?? 0));
-    const v = versions[0];
+    const v = latestVersion(file?.file_versions);
     const url = str(v?.url ?? v?.prostore_file?.url);
     if (!url) throw new ProcoreError("GET", `/rest/v1.0/files/${documentId}`, null, "the file has no downloadable version");
     const res = await this.raw(url, {}, true);
@@ -236,10 +276,32 @@ export const DEMO_PROJECTS: ProcoreProject[] = [
   { id: 900104, name: "Bangkok Central 4", projectNumber: "BKK-04" },
 ];
 
+interface DemoFolder {
+  id: string;
+  name: string;
+  parentId: string | null;
+  projectId: number;
+}
+interface DemoDocument {
+  id: string;
+  name: string;
+  folderId: string;
+  projectId: number;
+  versions: { number: number; mimeType: string | null; content: Buffer }[];
+}
+
+/**
+ * Demo company: the Bangkok Central data-centre projects with their equipment WBS, plus an in-memory Documents tool
+ * in which the LDC "stores" BOQ files (each project starts with Drawings, Specifications and BOQ folders).
+ */
 export class DemoProcoreAdapter implements ProcoreAdapter {
   readonly mode = "demo" as const;
   readonly companyId = DEMO_COMPANY_ID;
-  readonly documents = new Map<string, ProcoreFile & { projectId: number }>();
+  private readonly folders = new Map<string, DemoFolder>();
+  private readonly files = new Map<string, DemoDocument>();
+  private seq = 7_000_000;
+  /** Test hook: the next n downloads fail as if Procore answered 503. */
+  failNextDownloads = 0;
 
   async listProjects() {
     return DEMO_PROJECTS;
@@ -260,10 +322,63 @@ export class DemoProcoreAdapter implements ProcoreAdapter {
     }));
     return { costCodes, budgetCodes };
   }
-  async downloadDocument(projectId: number, documentId: string) {
-    const d = this.documents.get(documentId);
+
+  private project(projectId: number) {
+    if (!DEMO_PROJECTS.some((p) => p.id === projectId)) throw new ProcoreError("GET", "/rest/v1.0/folders", 404, `project ${projectId} is not in the demo company`);
+  }
+  private root(projectId: number) {
+    this.project(projectId);
+    const id = `root-${projectId}`;
+    if (!this.folders.has(id)) {
+      this.folders.set(id, { id, name: "Documents", parentId: null, projectId });
+      for (const n of ["Drawings", "Specifications", "BOQ"]) this.child(projectId, id, n);
+    }
+    return id;
+  }
+  private child(projectId: number, parentId: string, name: string) {
+    const found = [...this.folders.values()].find((f) => f.parentId === parentId && f.name.toLowerCase() === name.toLowerCase());
+    if (found) return found.id;
+    const id = String(++this.seq);
+    this.folders.set(id, { id, name, parentId, projectId });
+    return id;
+  }
+
+  /** Simulates someone storing a file in Procore Documents. Same name in the same folder = a new version. */
+  storeDocument(projectId: number, folderPath: string, fileName: string, content: Buffer, mimeType: string | null = null) {
+    let folderId = this.root(projectId);
+    for (const part of folderPath.split("/").map((x) => x.trim()).filter(Boolean)) folderId = this.child(projectId, folderId, part);
+    let doc = [...this.files.values()].find((d) => d.folderId === folderId && d.name === fileName);
+    if (!doc) {
+      doc = { id: String(++this.seq), name: fileName, folderId, projectId, versions: [] };
+      this.files.set(doc.id, doc);
+    }
+    doc.versions.push({ number: doc.versions.length + 1, mimeType, content });
+    return { fileId: doc.id, version: String(doc.versions.length), folderId };
+  }
+
+  async getFolder(projectId: number, folderId: string | null): Promise<ProcoreFolder> {
+    const id = folderId ?? this.root(projectId);
+    const f = this.folders.get(id);
+    if (!f || f.projectId !== projectId) throw new ProcoreError("GET", `/rest/v1.0/folders/${id}`, 404, "not found in the demo company");
+    return {
+      id,
+      name: f.name,
+      folders: [...this.folders.values()].filter((x) => x.parentId === id).map((x) => ({ id: x.id, name: x.name })),
+      files: [...this.files.values()]
+        .filter((d) => d.folderId === id)
+        .map((d) => ({ id: d.id, name: d.name, version: String(d.versions.length), updatedAt: null })),
+    };
+  }
+
+  async downloadDocument(projectId: number, documentId: string): Promise<ProcoreFile> {
+    if (this.failNextDownloads > 0) {
+      this.failNextDownloads--;
+      throw new ProcoreError("GET", `/rest/v1.0/files/${documentId}`, 503, "Service Unavailable (simulated)");
+    }
+    const d = this.files.get(documentId);
     if (!d || d.projectId !== projectId) throw new ProcoreError("GET", `/rest/v1.0/files/${documentId}`, 404, "not found in the demo company");
-    return d;
+    const v = d.versions[d.versions.length - 1]!;
+    return { fileName: d.name, mimeType: v.mimeType, revision: String(v.number), content: v.content };
   }
 }
 

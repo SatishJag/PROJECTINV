@@ -34,6 +34,47 @@ history, failures. `ordered_quantity` is reported as **Unknown** — a BOQ estab
 9. **Reconciliation** per revision — every extracted line is accounted for (published / split / held / unresolved /
    rejected, plus headings / subtotals / notes) and allocated quantities equal line quantities.
 
+## Automatic capture of BOQs stored in Procore
+
+When the LDC stores a BOQ in a project's Procore **Documents** tool, it is captured without anyone uploading it here.
+
+- **What is watched:** a top-level Documents folder named "BOQ" (or "Bill of Quantities") and its subfolders. To use
+  another folder, open *BOQ submissions → Automatic capture → Change folder*. Capture can be switched off per project.
+- **How files are found:**
+  1. A Procore webhook for a Documents event triggers an immediate check of that project's folder.
+  2. A periodic scan (`PROCORE_SCAN_MINUTES`, default 15 with live Procore) catches anything a webhook missed.
+  3. *Check Procore now* runs the same check by hand.
+- **What happens to each file:** every new file, and every new version of a file, in a supported format (Excel, CSV,
+  text PDF) is downloaded and goes through the normal intake: extraction, mapping, exceptions and the register. The
+  project is the Procore project the file was stored in.
+- **Revisions:**
+  - A new version of the same Procore file supersedes the previous revision.
+  - So does a revised file stored next to the old one ("… Rev B.xlsx" beside "… Rev A.xlsx"). Quantities are never
+    summed across revisions.
+- **Never twice:** each (project, Procore file, version) is captured once. Redelivered webhooks are recognised by their
+  `ulid`, and identical content is recognised by its file hash.
+- **Errors:**
+  - Temporary Procore errors (timeouts, 429, 5xx) are retried on later checks, up to 5 attempts.
+  - A file that cannot be read as a BOQ (e.g. a scanned PDF) is marked *could not read* and is left alone until a new
+    version is stored.
+  - Files in other formats (e.g. `.docx`) and files outside the watched folder are ignored.
+- **Record:** *BOQ submissions* lists every captured file version with how it was found and the result. Deliveries are
+  in `procore_webhook_events`, captures in `procore_document_captures` (migration `0003`).
+- **Demo:** with the demo company, *Store in Procore* on the BOQ page acts as the LDC. It stores a file in the simulated
+  Documents tool and delivers the webhook Procore would send.
+
+### Setting up the Procore webhook (live)
+
+1. Set `PROCORE_WEBHOOK_SECRET` to a long random value and deploy.
+2. In Procore, open *Project → Admin → Webhooks*, or create the hook through the Webhooks API at company level. Set:
+   - destination URL `https://<your-host>/api/procore/webhooks`;
+   - custom header `Authorization: Bearer <PROCORE_WEBHOOK_SECRET>`;
+   - triggers for the Documents resource (create and update).
+3. Procore does not sign deliveries, so the header is the only check. Requests without it get 401.
+
+Any event whose resource name mentions files, folders or documents triggers a check, and every other event is stored
+and ignored. The check is safe to repeat, so an over-broad trigger only costs API calls.
+
 ## Data model (`supabase/migrations`)
 
 | Table | Purpose |
@@ -92,6 +133,13 @@ sandbox company `4283715`); without them the built-in demo company is used.
 4. Open the app → *WBS & cost codes* → **Sync all from Procore**.
 
 ## Not yet verified against live Procore
+
+Not yet proven against the sandbox:
+- the Documents folder listing (`GET /rest/v1.0/folders` and `/folders/{id}` with `project_id`);
+- the exact webhook resource name for Documents events;
+- whether Procore sends a webhook when a new file version is uploaded.
+
+The periodic scan covers the last two until they are confirmed.
 
 The WBS calls (`work_breakdown_structure/segments/{id}/segment_items`, `wbs_codes`) are the ones proven in AdvaPay;
 the Documents download (`GET /rest/v1.0/files/{id}` → latest `file_versions[].url`) has not been run against the

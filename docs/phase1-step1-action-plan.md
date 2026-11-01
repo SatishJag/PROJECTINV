@@ -69,6 +69,13 @@ assemblies, test/failure, reservations, arrival, handbooks. `ordered_quantity` s
 Suggested order: 1 → 2 → 3 → 4 can run on local Postgres now. 5 needs a go-ahead to create a Supabase project (it may
 be billable). 6 needs Procore sandbox credentials. 7 needs real BOQ files.
 
+## 4a. Progress
+
+| Date | Done |
+|---|---|
+| 1 Nov 2026 | PR #1 merged into the working branch (`step1-register/`, alongside PCX) |
+| 1 Nov 2026 | **Automatic BOQ capture from Procore Documents.** A BOQ stored in the project's "BOQ" folder (or a chosen folder) is captured into the register via a webhook plus a periodic catch-up scan. Covers new versions, Rev B files beside Rev A, duplicates, unreadable files and temporary errors. 15 new tests (33 total); verified in the browser on demo data. Still needs Procore sandbox confirmation (step 6) |
+
 ## 5. Decisions needed from the owner
 
 1. **Repo layout** — (a) make the Step 1 app the repo root and move PCX to `legacy/pcx/` *(recommended)*, or (b) keep

@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { api, download, qty, when } from "../api";
 import { Card, Drawer, ErrorNote, Messages, Pill, statusTone, useLoad } from "../ui";
+import { ProcoreCapture } from "./ProcoreCapture";
 
 export function Reconciliation({ r }: { r: any }) {
   return (
@@ -86,6 +87,14 @@ export function BoqPage({ project, onChange }: { project: any; onChange: () => v
 
   return (
     <>
+      <ProcoreCapture
+        project={project}
+        onCaptured={() => {
+          list.reload();
+          onChange();
+        }}
+        onOpen={setOpen}
+      />
       <div className="two-col">
         <Card title="Submit a BOQ">
           <form ref={form} className="form" onSubmit={submit}>
@@ -112,7 +121,7 @@ export function BoqPage({ project, onChange }: { project: any; onChange: () => v
             </div>
           </form>
         </Card>
-        <Card title="Import from Procore Documents">
+        <Card title="Import one Procore file by ID">
           <form className="form" onSubmit={fromProcore}>
             <label className="full">
               Procore file ID

@@ -24,13 +24,25 @@ There are three separate efforts. Know which one you are touching.
 | Location | What | Status | Rule for agents |
 |---|---|---|---|
 | `main`: `backend/`, `web/` | **PCX**: full lifecycle prototype (Python/FastAPI + SQLite, React) | 35 tests pass | **Reference only.** Don't extend it for Step 1 or delete it without owner approval |
-| PR #1: `step1-register/` | **Step 1 app** (Node/Fastify + Postgres, React/Vite) | 18 tests pass, not merged | **Base for Step 1 code** |
+| `step1-register/` (PR #1 merged into this branch, plus BOQ auto-capture) | **Step 1 app** (Node/Fastify + Postgres, React/Vite) | 33 tests pass | **Base for Step 1 code** |
 | `feature/step1-foundation`: `supabase/migrations/0001–0008` | **Canonical schema** (30 tables, including dormant Step 2+ tables) | Broken: 0002/0004/0005 lack composite unique keys | **Canonical data model.** Fix it, then port the Step 1 app onto it |
 
 - `feature/step1-foundation` was cut from the initial commit. **Never merge it into `main` as is**, because that would
   delete PCX. Cherry-pick or copy its files instead.
 - Still open (see the plan, §5): final repo layout (recommended: Step 1 at root, PCX to `legacy/pcx/`), the Supabase
   project, Procore sandbox credentials and real BOQ samples. Don't decide these yourself. Ask.
+
+### Current feature: automatic BOQ capture from Procore Documents
+
+When the LDC stores a BOQ in a project's watched Procore Documents folder, it is captured into the register without a
+manual upload. The code is `step1-register/server/src/capture.ts`, migration `0003_procore_document_capture.sql`, the UI
+card is `web/src/pages/ProcoreCapture.tsx`, and the tests are `server/test/capture.test.ts`.
+
+- A webhook, the periodic scan and "Check Procore now" all run the **same idempotent folder scan**. Never build a path
+  that imports directly from a webhook payload.
+- Each (project, Procore file id, file version) is captured once. Keep it that way.
+- Folder listing, the Documents webhook resource name and version-upload webhooks are unverified against live
+  Procore, so the periodic scan must stay on in live mode.
 
 ## 3. Domain rules (non-negotiable)
 

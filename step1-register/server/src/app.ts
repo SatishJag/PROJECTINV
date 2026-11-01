@@ -6,8 +6,20 @@ import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { z } from "zod";
 import type { Db } from "./db.js";
-import type { ProcoreAdapter } from "./procore.js";
+import { DemoProcoreAdapter, type ProcoreAdapter } from "./procore.js";
 import { audit, syncFromProcore } from "./sync.js";
+import {
+  getWatch,
+  listCaptures,
+  processWebhook,
+  processWebhookInBackground,
+  recordWebhook,
+  scanProject,
+  setWatch,
+  webhookAuthorized,
+  WebhookRejected,
+  type CaptureContext,
+} from "./capture.js";
 import { confirmProject, correctLine, InputError, reconciliation, rejectLine, resolveLine, submitBoq } from "./boq/ingest.js";
 
 export interface AppDeps {
@@ -16,6 +28,8 @@ export interface AppDeps {
   organizationId: string;
   appPassword?: string | null;
   webDist?: string | null;
+  /** Value Procore sends as "Authorization: Bearer <secret>" on webhook deliveries; webhooks are refused without it. */
+  webhookSecret?: string | null;
 }
 
 const uuid = z.string().uuid();
@@ -28,12 +42,13 @@ export async function buildApp(deps: AppDeps) {
   const actorOf = (req: FastifyRequest) => String(req.headers["x-user-name"] ?? "").trim().slice(0, 120) || "user";
 
   app.addHook("onRequest", async (req, reply) => {
-    if (!deps.appPassword || !req.url.startsWith("/api/") || req.url === "/api/health") return;
+    if (!deps.appPassword || !req.url.startsWith("/api/") || req.url === "/api/health" || req.url.startsWith("/api/procore/webhooks")) return;
     if (req.headers.authorization !== `Bearer ${deps.appPassword}`) return reply.code(401).send({ error: "Sign in required" });
   });
 
   app.setErrorHandler((err: any, _req, reply) => {
     if (err instanceof InputError) return reply.code(err.status).send({ error: err.message });
+    if (err instanceof WebhookRejected) return reply.code(err.status).send({ error: err.message });
     if (err instanceof z.ZodError) return reply.code(400).send({ error: err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
     if (err?.code && /^(23|22|P0)/.test(String(err.code))) return reply.code(409).send({ error: err.message });
     if (err?.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({ error: err.message });
@@ -72,7 +87,12 @@ export async function buildApp(deps: AppDeps) {
     return { ok: true };
   });
 
-  app.get("/api/config", async () => ({ procoreMode: procore.mode, procoreCompanyId: procore.companyId, passwordRequired: !!deps.appPassword }));
+  app.get("/api/config", async () => ({
+    procoreMode: procore.mode,
+    procoreCompanyId: procore.companyId,
+    passwordRequired: !!deps.appPassword,
+    webhooksConfigured: !!deps.webhookSecret,
+  }));
 
   app.post("/api/procore/sync", async (req) => {
     const body = z.object({ procoreProjectId: z.number().int().optional() }).parse(req.body ?? {});
@@ -331,6 +351,85 @@ export async function buildApp(deps: AppDeps) {
     if (!r.rows[0]) throw new InputError("Item not found", 404);
     await audit(db, { organizationId, actor: actorOf(req), action: "item.updated", entity: "item_definition", entityId: req.params.id, detail: b });
     return r.rows[0];
+  });
+
+  // ---------------------------------------------------------------- automatic capture from Procore Documents
+  const capture: CaptureContext = { db, procore, organizationId };
+
+  /** Procore webhook receiver: stored, acknowledged at once, processed in the background. */
+  app.post("/api/procore/webhooks", async (req, reply) => {
+    if (!deps.webhookSecret) return reply.code(503).send({ error: "Webhooks are not configured (set PROCORE_WEBHOOK_SECRET)" });
+    if (!webhookAuthorized(deps.webhookSecret, req.headers.authorization)) return reply.code(401).send({ error: "Delivery is not authorized" });
+    const r = await recordWebhook(capture, req.body);
+    if (r.eventId) processWebhookInBackground(capture, r.eventId);
+    return reply.code(202).send({ status: r.duplicate ? "duplicate" : "accepted" });
+  });
+
+  app.get("/api/procore/webhook-events", async () =>
+    (
+      await db.query(
+        `select e.event_id, e.delivery_id, e.procore_project_id, e.resource_name, e.event_type, e.resource_id, e.state, e.message, e.received_at, e.processed_at,
+                p.project_name
+         from procore_webhook_events e left join projects p on p.project_id = e.project_id
+         where e.organization_id = $1 order by e.received_at desc limit 100`,
+        [organizationId],
+      )
+    ).rows,
+  );
+
+  app.get<{ Params: { id: string } }>("/api/projects/:id/procore-watch", async (req) => {
+    const p = await projectOr404(req.params.id);
+    return { watch: await getWatch(db, p.project_id), captures: await listCaptures(db, p.project_id) };
+  });
+
+  app.put<{ Params: { id: string } }>("/api/projects/:id/procore-watch", async (req) => {
+    const p = await projectOr404(req.params.id);
+    const b = z
+      .object({ enabled: z.boolean().optional(), folderId: z.string().trim().min(1).nullable().optional(), folderPath: z.string().trim().nullish(), includeSubfolders: z.boolean().optional() })
+      .parse(req.body ?? {});
+    return { watch: await setWatch(db, organizationId, p.project_id, b, actorOf(req)) };
+  });
+
+  /** Browse the project's Procore Documents folders (to choose the folder to watch). */
+  app.get<{ Params: { id: string }; Querystring: { folderId?: string } }>("/api/projects/:id/procore-folders", async (req) => {
+    const p = await projectOr404(req.params.id);
+    if (!p.procore_project_id) throw new InputError("This project is not linked to a Procore project");
+    const f = await procore.getFolder(Number(p.procore_project_id), req.query.folderId?.trim() || null);
+    return { id: f.id, name: f.name, folders: f.folders, files: f.files.map((x) => ({ id: x.id, name: x.name, version: x.version })) };
+  });
+
+  /** "Check Procore now": scan the watched folder immediately. */
+  app.post<{ Params: { id: string } }>("/api/projects/:id/procore-scan", async (req) => {
+    const p = await projectOr404(req.params.id);
+    const result = await scanProject(capture, p.project_id, "manual");
+    return { result, watch: await getWatch(db, p.project_id), captures: await listCaptures(db, p.project_id) };
+  });
+
+  /**
+   * Demo company only: act as the LDC storing a BOQ in Procore Documents. The file is stored in the simulated
+   * Documents tool and the webhook Procore would send is delivered, so the capture runs exactly as it would live.
+   */
+  app.post<{ Params: { id: string } }>("/api/projects/:id/demo/procore-documents", async (req) => {
+    if (!(procore instanceof DemoProcoreAdapter)) throw new InputError("Only available with the demo Procore company", 404);
+    const p = await projectOr404(req.params.id);
+    const b = z
+      .object({ fileName: z.string().trim().min(1), contentBase64: z.string().min(1), folderPath: z.string().trim().default("BOQ"), mimeType: z.string().nullish(), sendWebhook: z.boolean().default(true) })
+      .parse(req.body);
+    const stored = procore.storeDocument(Number(p.procore_project_id), b.folderPath, b.fileName, Buffer.from(b.contentBase64, "base64"), b.mimeType ?? null);
+    let event = null;
+    if (b.sendWebhook) {
+      const r = await recordWebhook(capture, {
+        ulid: `demo-${stored.fileId}-${stored.version}-${Date.now()}`,
+        company_id: procore.companyId,
+        project_id: Number(p.procore_project_id),
+        resource_name: "Documents",
+        resource_id: stored.fileId,
+        event_type: stored.version === "1" ? "create" : "update",
+        api_version: "v2",
+      });
+      event = r.eventId ? await processWebhook(capture, r.eventId) : null;
+    }
+    return { stored, event, watch: await getWatch(db, p.project_id), captures: await listCaptures(db, p.project_id) };
   });
 
   app.get("/api/units", async () => (await db.query(`select uom_id, code, name, measurement_dimension, aliases from units_of_measure order by measurement_dimension, code`)).rows);

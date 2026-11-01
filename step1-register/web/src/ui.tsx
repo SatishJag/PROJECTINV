@@ -22,7 +22,7 @@ export function useLoad<T>(fn: () => Promise<T>, deps: unknown[]) {
 export const Pill = ({ tone = "neutral", children }: { tone?: "ok" | "warn" | "bad" | "neutral" | "info"; children: ReactNode }) => <span className={`pill pill-${tone}`}>{children}</span>;
 
 export const statusTone = (s: string) =>
-  ({ mapped: "ok", split: "ok", valid: "ok", current: "ok", verified: "ok", validated: "ok", extracted: "ok", proposed: "warn", unresolved: "bad", unmapped: "bad", invalid: "bad", rejected: "neutral", superseded: "neutral", provisional: "warn", not_applicable: "neutral", no_current_source: "neutral" })[s] as any ?? "neutral";
+  ({ mapped: "ok", split: "ok", valid: "ok", current: "ok", verified: "ok", validated: "ok", extracted: "ok", proposed: "warn", unresolved: "bad", unmapped: "bad", invalid: "bad", rejected: "neutral", superseded: "neutral", provisional: "warn", not_applicable: "neutral", no_current_source: "neutral", captured: "ok", duplicate: "neutral", failed: "bad", retry: "warn", pending: "info" })[s] as any ?? "neutral";
 
 export function Card({ title, actions, children }: { title?: ReactNode; actions?: ReactNode; children: ReactNode }) {
   return (
