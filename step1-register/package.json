@@ -16,7 +16,6 @@
     "migrate": "npm run migrate -w @projectinv/server",
     "test": "npm test -w @projectinv/server",
     "typecheck": "npm run typecheck -w @projectinv/server && npm run typecheck -w @projectinv/web",
-    "samples": "npm run samples -w @projectinv/server",
-    "files:migrate": "npm run files:migrate -w @projectinv/server"
+    "samples": "npm run samples -w @projectinv/server"
   }
 }

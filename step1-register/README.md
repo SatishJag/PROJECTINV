@@ -81,14 +81,17 @@ and ignored. The check is safe to repeat, so an over-broad trigger only costs AP
 | --- | --- |
 | `projects` | Internal UUID, Procore company/project IDs, name |
 | `work_packages` | Project WBS hierarchy / equipment work packages (+ BOQ match terms) |
-| `cost_assignments` | Approved work package ↔ Procore budget-code context (cost code, cost type, segments) |
-| `units_of_measure` | Controlled units + source aliases |
+| `cost_assignments`, `cost_code_segments` | Approved work package ↔ Procore budget-code context (cost code, cost type, one row per segment) |
+| `units_of_measure`, `uom_conversions` | Controlled units per organization + source aliases; conversions only within one dimension |
 | `item_definitions`, `item_aliases` | Equipment/material identity shared across projects (`ITM-00001`); never holds quantities |
-| `boq_document_revisions` | Source file, Procore document/revision, sha256, original bytes, status |
-| `boq_lines` | Every extracted line, raw values, locator, validation + mapping status |
+| `boq_document_revisions` | Source file, Procore document/revision, sha256, file-store key, status (`accepted` / `superseded`) |
+| `boq_lines` | Every extracted line, raw values as written, locator, validation + mapping status |
+| `mapping_exceptions` | The exception queue: one open row per line that cannot be published |
+| `ingestion_runs` | Each import's reconciliation counts |
 | `inventory_requirements` | **The register**: project + work package + cost assignment + item + UOM |
 | `requirement_boq_allocations` | How much of which BOQ line each record holds |
-| `inventory_register` (view) | Current quantities from current revisions only; `ordered_quantity` = NULL |
+| `inventory_register` (view) | Current quantities from accepted revisions only; `ordered_quantity` = NULL |
+| commitments, units, assemblies, quality tables | Created now with RLS, no behaviour in Step 1 |
 
 Enforced by the database, not only the UI:
 
@@ -97,8 +100,13 @@ Enforced by the database, not only the UI:
 - unique `(project, file hash)`, `(project, Procore document, revision)`, `(revision, source locator)`, one current
   revision per document;
 - a trigger refuses allocations above the line quantity, in a different unit, or on headings/subtotals;
-- row-level security (`0002`): Supabase users (`authenticated`) read only projects they are members of
-  (`project_members`). The API connects as the database owner and writes through validated code.
+- the exception queue is `mapping_exceptions`; each import's reconciliation is an `ingestion_runs` row;
+- row-level security on every table: signed-in users (`authenticated`, user id in `request.jwt.claim.sub`) see only
+  the projects in their `project_memberships`, and nobody but the service role can DELETE. The API currently connects
+  as the database owner and writes through validated code (per-user sessions are step 4 of the action plan).
+
+Schema checks A1–A10: `db-tests/acceptance_step1.sql` (run by `npm test`, or against a real Postgres with
+`db-tests/check_migrations.sh <empty-db-url>`).
 
 ## Run locally
 
@@ -136,8 +144,6 @@ Original files are **not** stored in Postgres. The database keeps each revision'
   `AZURE_STORAGE_CONNECTION_STRING` to the Azurite connection string. The tests start Azurite themselves.
 - **A local folder** (`FILE_STORE_DIR`, default `data/files`) when neither is set. Development only.
 
-Databases created before migration `0004` hold originals in `file_content`. Run `npm run files:migrate` with
-`DATABASE_URL` and the file-store settings to move them out. It is safe to repeat.
 
 ## Deploy on Azure (target platform)
 

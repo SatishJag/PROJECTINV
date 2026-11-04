@@ -176,33 +176,3 @@ export function fileStoreFromEnv(env: NodeJS.ProcessEnv): FileStore {
   if (kind === "local") return new LocalFileStore(path.resolve(env.FILE_STORE_DIR || "data/files"));
   throw new FileStoreError(`Unknown FILE_STORE "${kind}" (use azure-blob or local)`);
 }
-
-/**
- * Moves originals stored in the database before the file store existed (boq_document_revisions.file_content) into the
- * store, checking each against its recorded sha256. Safe to run repeatedly; returns how many files were moved.
- */
-export async function moveLegacyFiles(db: import("./db.js").Queryable, files: FileStore, log: (m: string) => void = () => {}) {
-  let moved = 0;
-  for (;;) {
-    const rows = (
-      await db.query<{ boq_revision_id: string; organization_id: string; project_id: string; file_hash: string; mime_type: string | null; file_name: string; file_content: Buffer }>(
-        `select boq_revision_id, organization_id, project_id, file_hash, mime_type, file_name, file_content
-         from boq_document_revisions where storage_key is null and file_content is not null order by submitted_at limit 20`,
-      )
-    ).rows;
-    if (!rows.length) return moved;
-    for (const r of rows) {
-      const content = Buffer.from(r.file_content);
-      verify(r.boq_revision_id, content, r.file_hash);
-      const key = boqFileKey(r.organization_id, r.project_id, r.file_hash);
-      await files.put(key, content, { sha256: r.file_hash, contentType: r.mime_type, fileName: r.file_name });
-      await db.query(
-        `update boq_document_revisions set storage_kind = $2, storage_key = $3, file_content = null, updated_at = now()
-         where boq_revision_id = $1 and storage_key is null`,
-        [r.boq_revision_id, files.kind, key],
-      );
-      moved++;
-      log(`moved ${r.file_name} (${content.length} bytes) to ${files.kind}`);
-    }
-  }
-}

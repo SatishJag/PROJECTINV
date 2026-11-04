@@ -10,8 +10,7 @@
     "migrate": "tsx src/migrateCli.ts",
     "samples": "tsx scripts/makeSamples.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "files:migrate": "tsx src/moveFilesCli.ts"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@azure/identity": "^4.14.1",

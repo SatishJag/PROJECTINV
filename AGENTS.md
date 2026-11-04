@@ -24,8 +24,8 @@ There are three separate efforts. Know which one you are touching.
 | Location | What | Status | Rule for agents |
 |---|---|---|---|
 | `main`: `backend/`, `web/` | **PCX**: full lifecycle prototype (Python/FastAPI + SQLite, React) | 35 tests pass | **Reference only.** Don't extend it for Step 1 or delete it without owner approval |
-| `step1-register/` (PR #1 merged into this branch, plus BOQ auto-capture) | **Step 1 app** (Node/Fastify + Postgres, React/Vite) | 33 tests pass | **Base for Step 1 code** |
-| `feature/step1-foundation`: `supabase/migrations/0001–0008` | **Canonical schema** (30 tables, including dormant Step 2+ tables) | Broken: 0002/0004/0005 lack composite unique keys | **Canonical data model.** Fix it, then port the Step 1 app onto it |
+| `step1-register/` (PR #1 merged into this branch, plus BOQ auto-capture) | **Step 1 app** (Node/Fastify + Postgres, React/Vite), running on the canonical schema | 44 tests pass, incl. A1–A10 | **Base for Step 1 code** |
+| `step1-register/supabase/migrations/0000–0011` | **Canonical schema** from `feature/step1-foundation` (30 tables, incl. dormant Step 2+ tables), fixed, plus `0009` integrity rules, `0010` app columns, `0011` Procore capture | Applies on Postgres 16 and PGlite; `db-tests/acceptance_step1.sql` passes | **Canonical data model.** Change it only by the rules in §5 |
 
 - `feature/step1-foundation` was cut from the initial commit. **Never merge it into `main` as is**, because that would
   delete PCX. Cherry-pick or copy its files instead.
@@ -55,7 +55,7 @@ interfaces. **Supabase is no longer the target platform.** It, or plain local Po
 ### Current feature: automatic BOQ capture from Procore Documents
 
 When the LDC stores a BOQ in a project's watched Procore Documents folder, it is captured into the register without a
-manual upload. The code is `step1-register/server/src/capture.ts`, migration `0003_procore_document_capture.sql`, the UI
+manual upload. The code is `step1-register/server/src/capture.ts`, migration `0011_procore_document_capture.sql`, the UI
 card is `web/src/pages/ProcoreCapture.tsx`, and the tests are `server/test/capture.test.ts`.
 
 - A webhook, the periodic scan and "Check Procore now" all run the **same idempotent folder scan**. Never build a path
@@ -111,24 +111,21 @@ and handbooks have **tables only, with no behaviour**.
 
 ## 5. Migrations
 
-- They live in `supabase/migrations/NNNN_name.sql`. They apply strictly in order, and each must apply cleanly on plain
+- They live in `step1-register/supabase/migrations/NNNN_name.sql` (`0000_auth.sql` is the `auth` schema the policies use). They apply strictly in order, and each must apply cleanly on plain
   Postgres 16+ (with the local `auth` shim) and on Azure Database for PostgreSQL.
-- **Before the first hosted deploy:** fix the baseline files (0001–0008) in place.
+- **Before the first hosted deploy:** fix the baseline files (0000–0011) in place.
   **After the first hosted deploy:** never edit an applied migration. Add a new one.
 - Evolve in this order: add the column or table → update behaviour → backfill from evidence → validate → tighten the
   constraints.
 - Every composite FK `(project_id, x_id)` needs a matching `unique (project_id, x_id)` on the parent.
 
-Local check against Postgres (needs a stand-in for the Supabase `auth` schema):
+Check against a real Postgres (an empty database): applies every migration, then runs A1–A10.
 
 ```bash
-psql "$DB" -c "create schema auth; create table auth.users(id uuid primary key);
-  create function auth.uid() returns uuid language sql stable as
-  \$\$ select nullif(current_setting('request.jwt.claim.sub', true),'')::uuid \$\$;
-  create role anon nologin; create role authenticated nologin; create role service_role nologin bypassrls;"
-for f in supabase/migrations/*.sql; do psql "$DB" -v ON_ERROR_STOP=1 -f "$f" || break; done
-psql "$DB" -v ON_ERROR_STOP=1 -f tests/acceptance_step1.sql
+cd step1-register && db-tests/check_migrations.sh postgresql://user:pass@host:5432/empty_db
 ```
+
+`npm test` runs the same A1–A10 script on PGlite (`server/test/acceptance.test.ts`).
 
 ## 6. Commands
 
@@ -142,7 +139,6 @@ npm run build
 PROCORE_MODE=demo npm start          # http://localhost:4100, demo Bangkok Central company
 npm run dev:server / npm run dev:web # API :4100, Vite :5173
 npm run samples                      # regenerate sample BOQs in samples/
-npm run files:migrate                # move originals still stored in Postgres into the file store
 ```
 
 Configuration lives in `.env.example`. Without `PROCORE_CLIENT_ID`/`SECRET`, the demo Procore adapter is used.

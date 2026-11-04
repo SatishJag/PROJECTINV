@@ -12,7 +12,7 @@ to:
 2. extract lines and text and make them searchable with AI (semantic and vector search);
 3. compare what was extracted with the inventory master data (items, work packages, cost codes), and form links.
 
-Today the original file is stored inside Postgres (`boq_document_revisions.file_content`) and parsed during the request.
+Before 1 Nov 2026 the original file was stored inside Postgres (`boq_document_revisions.file_content`) and parsed during the request; it now lives in the file store.
 That works for the demo but will not scale to heavy files or volume.
 
 ## Recommendation

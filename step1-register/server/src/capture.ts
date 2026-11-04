@@ -204,7 +204,7 @@ async function captureFile(ctx: CaptureContext, project: { project_id: string; p
       fileName: file.fileName || f.name,
       mimeType: file.mimeType,
       content: file.content,
-      sourceTool: "procore_documents",
+      sourceTool: "procore",
       procoreProjectId: project.procore_project_id,
       procoreDocumentId: f.id,
       sourceRevision: file.revision ?? version,

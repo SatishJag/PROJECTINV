@@ -229,7 +229,7 @@ function RevisionDrawer({ id, onClose, onChange }: { id: string; onClose: () => 
           </div>
           <Reconciliation r={d.data.reconciliation} />
           <Messages list={rev.processing_messages} />
-          {rev.project_conflict && rev.document_status === "current" && (
+          {rev.project_conflict && rev.document_status === "accepted" && (
             <div className="note note-bad">
               The file names <b>{rev.declared_project_name}</b>. Nothing from it is published until someone confirms this project is correct.
               <div className="inline-form">

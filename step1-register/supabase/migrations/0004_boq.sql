@@ -72,7 +72,7 @@ create table public.boq_lines (
                            check (line_type in ('item','heading','subtotal','note')),
     raw_description        text,
     raw_item_code          text,
-    raw_quantity           numeric(19,6),
+    raw_quantity           text,          -- exactly as written in the source ("1,200", "1 lot"); parsed into normalized_quantity
     raw_uom                text,
     -- normalized values (validated, not yet attributed)
     normalized_uom_id      uuid references public.units_of_measure (uom_id),
@@ -80,7 +80,8 @@ create table public.boq_lines (
     stated_wbs_reference   text,
     stated_cost_code       text,
     validation_status      text not null default 'pending'
-                           check (validation_status in ('pending','valid','ambiguous','rejected')),
+                           -- invalid: quantity or unit unreadable; not_applicable: headings, subtotals, notes
+                           check (validation_status in ('pending','valid','ambiguous','rejected','invalid','not_applicable')),
     validation_notes       text,
     created_at             timestamptz not null default now(),
     updated_at             timestamptz not null default now(),

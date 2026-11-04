@@ -150,13 +150,13 @@ function RecordDrawer({ id, onClose }: { id: string; onClose: () => void }) {
           </dl>
           <h3>Source evidence</h3>
           {d.data.sources.map((s: any) => (
-            <div key={s.allocation_id} className={`source ${s.document_status !== "current" ? "source-old" : ""}`}>
+            <div key={s.allocation_id} className={`source ${s.document_status !== "accepted" ? "source-old" : ""}`}>
               <div className="source-head">
                 <strong>{s.file_name}</strong>
                 <Pill tone={statusTone(s.document_status)}>{s.document_status}</Pill>
               </div>
               <div className="source-meta">
-                {s.source_tool === "procore_documents" || s.procore_document_id ? `Procore document ${s.procore_document_id ?? "–"} · ` : "Uploaded · "}
+                {s.source_tool === "procore" || s.procore_document_id ? `Procore document ${s.procore_document_id ?? "–"} · ` : "Uploaded · "}
                 revision {s.source_revision ?? "–"} · {when(s.submitted_at)}
               </div>
               <div className="source-meta">

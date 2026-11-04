@@ -4,9 +4,8 @@
 set -eu
 DB="$1"
 cd "$(dirname "$0")/.."
-psql "$DB" -q -v ON_ERROR_STOP=1 -f tests/local_auth_shim.sql
 for f in supabase/migrations/*.sql; do
   echo "apply $f"
   psql "$DB" -q -v ON_ERROR_STOP=1 -f "$f"
 done
-psql "$DB" -q -v ON_ERROR_STOP=1 -f tests/acceptance_step1.sql
+psql "$DB" -q -v ON_ERROR_STOP=1 -f db-tests/acceptance_step1.sql

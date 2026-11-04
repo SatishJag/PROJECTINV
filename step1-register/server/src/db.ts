@@ -50,7 +50,8 @@ export function pgDb(connectionString: string): Db {
 /** In-process Postgres (PGlite) for tests and for running without DATABASE_URL. */
 export async function pgliteDb(): Promise<Db> {
   const { PGlite } = await import("@electric-sql/pglite");
-  const lite = new PGlite();
+  const { btree_gist } = await import("@electric-sql/pglite/contrib/btree_gist");
+  const lite = new PGlite({ extensions: { btree_gist } });
   const wrap = (q: { query: (t: string, p?: any[]) => Promise<any> }): Queryable => ({
     query: async (t, p) => {
       const r = await q.query(t, p as any[]);

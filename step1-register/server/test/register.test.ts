@@ -70,6 +70,13 @@ describe("BOQ submission for Bangkok Central 1", () => {
     expect(r.body.revision.declared_project_name).toBe("Bangkok Central 1");
     expect(r.body.revision.project_conflict).toBe(false);
     expect(r.body.reconciliation).toMatchObject({ totalLines: 20, headings: 4, subtotals: 2, notes: 1, items: 13, published: 8, held: 2, unresolved: 3, invalid: 2, rejected: 0, accountedFor: true });
+    // the exception queue holds one open exception per line that cannot be published, and the run is reconciled
+    const exc = (await db.query(`select exception_type, count(*)::int as n from mapping_exceptions e join boq_lines l using (boq_line_id)
+                                  where l.boq_revision_id = $1 and e.state = 'open' group by 1 order by 1`, [rev])).rows;
+    expect(exc).toEqual([{ exception_type: "quantity_invalid", n: 1 }, { exception_type: "unattributed_work_package", n: 3 }, { exception_type: "uom_unresolvable", n: 1 }]);
+    const run = (await api("GET", `/api/boq/${rev}`)).body.ingestionRuns;
+    expect(run).toHaveLength(1);
+    expect(run[0]).toMatchObject({ run_status: "completed", extracted_count: 20, item_count: 13, exception_count: 5, rejected_count: 0, validated_count: 8, non_item_count: 7 });
   });
 
   it("maps by heading or explicit cost code, never by description alone", async () => {
@@ -145,6 +152,11 @@ describe("BOQ submission for Bangkok Central 1", () => {
     expect(rec).toMatchObject({ items: 12, published: 10, split: 1, held: 0, unresolved: 0, rejected: 1, accountedFor: true });
     const exceptions = (await api("GET", `/api/projects/${P["Bangkok Central 1"].project_id}/exceptions`)).body.rows;
     expect(exceptions).toHaveLength(0);
+    const queue = (await db.query(`select l.raw_item_code, e.state, e.resolution from mapping_exceptions e join boq_lines l using (boq_line_id)
+                                    where l.boq_revision_id = $1 and l.raw_item_code in ('4.1', 'E4', 'E5', '2.3') order by 1`, [rev])).rows;
+    expect(queue.map((x) => [x.raw_item_code, x.state])).toEqual([["2.3", "dismissed"], ["4.1", "resolved"], ["E4", "dismissed"], ["E5", "resolved"]]);
+    expect(queue.find((x) => x.raw_item_code === "E4")!.resolution).toBe("Civil scope, not equipment");
+    expect((await db.query(`select count(*)::int as n from mapping_exceptions e join boq_lines l using (boq_line_id) where l.boq_revision_id = $1 and e.state = 'open'`, [rev])).rows[0]!.n).toBe(0);
     const upsRows = await register(P["Bangkok Central 1"].project_id, "UPS");
     expect(upsRows.find((r) => r.item_description === "Copper cable").boq_quantity).toBe("1100.000000");
     expect(upsRows.find((r) => r.item_description.startsWith("Cable tray")).source_line_count).toBe(1);
@@ -155,7 +167,7 @@ describe("BOQ submission for Bangkok Central 1", () => {
     expect(r.status).toBe(200);
     expect(r.body.supersededRevisionId).toBe(rev);
     const revs = (await api("GET", `/api/projects/${P["Bangkok Central 1"].project_id}/boq`)).body.revisions;
-    expect(revs.map((x: any) => [x.source_revision, x.document_status])).toEqual([["B", "current"], ["A", "superseded"]]);
+    expect(revs.map((x: any) => [x.source_revision, x.document_status])).toEqual([["B", "accepted"], ["A", "superseded"]]);
     const lines = await linesOf(r.body.revisionId);
     expect(line(lines, "3.1")).toMatchObject({ mapping_status: "split", mapping_basis: "resolution carried from the previous revision" });
     expect(line(lines, "4.1")).toMatchObject({ mapping_status: "mapped", work_package_name: "UPS" });
@@ -212,10 +224,10 @@ describe("Project separation", () => {
     ).rejects.toThrow(/foreign key/);
     const bc2Line = (await db.query(`select boq_line_id from boq_lines where project_id = $1 and raw_item_code = '1.1'`, [bc2])).rows[0]!.boq_line_id;
     await expect(
-      db.query(`insert into requirement_boq_allocations (project_id, inventory_record_id, boq_line_id, allocated_quantity, uom_id) values ($1, $2, $3, 1, $4)`, [bc1, bc1Req.inventory_record_id, bc2Line, uom]),
+      db.query(`insert into requirement_boq_allocations (organization_id, project_id, inventory_record_id, boq_line_id, allocated_quantity, uom_id) values ($5, $1, $2, $3, 1, $4)`, [bc1, bc1Req.inventory_record_id, bc2Line, uom, orgId]),
     ).rejects.toThrow(/another project|foreign key/);
     // and through the API
-    const bc1Open = (await db.query(`select l.boq_line_id from boq_lines l join boq_document_revisions d using (boq_revision_id) where l.project_id = $1 and d.document_status = 'current' and l.raw_item_code = '1.2'`, [bc1])).rows[0]!.boq_line_id;
+    const bc1Open = (await db.query(`select l.boq_line_id from boq_lines l join boq_document_revisions d using (boq_revision_id) where l.project_id = $1 and d.document_status = 'accepted' and l.raw_item_code = '1.2'`, [bc1])).rows[0]!.boq_line_id;
     const res = await api("POST", `/api/lines/${bc1Open}/resolve`, { allocations: [{ costAssignmentId: s2.costAssignments[1].cost_assignment_id, quantity: 1200 }] });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/not part of this BOQ line's project/);
@@ -223,10 +235,10 @@ describe("Project separation", () => {
 
   it("the database refuses allocations above the line quantity", async () => {
     const bc2 = P["Bangkok Central 2"].project_id;
-    const l = (await db.query(`select boq_line_id, uom_id from boq_lines where project_id = $1 and raw_item_code = '1.1'`, [bc2])).rows[0]!;
+    const l = (await db.query(`select boq_line_id, normalized_uom_id as uom_id from boq_lines where project_id = $1 and raw_item_code = '1.1'`, [bc2])).rows[0]!;
     const req = (await db.query(`select inventory_record_id from requirement_boq_allocations where boq_line_id = $1`, [l.boq_line_id])).rows[0]!;
     await expect(
-      db.query(`insert into requirement_boq_allocations (project_id, inventory_record_id, boq_line_id, allocated_quantity, uom_id) values ($1, $2, $3, 1, $4)`, [bc2, req.inventory_record_id, l.boq_line_id, l.uom_id]),
+      db.query(`insert into requirement_boq_allocations (organization_id, project_id, inventory_record_id, boq_line_id, allocated_quantity, uom_id) values ($5, $1, $2, $3, 1, $4)`, [bc2, req.inventory_record_id, l.boq_line_id, l.uom_id, orgId]),
     ).rejects.toThrow();
   });
 
@@ -253,7 +265,9 @@ describe("Project separation", () => {
 
   it("row-level security limits a signed-in user to their projects", async () => {
     const user = "11111111-1111-1111-1111-111111111111";
-    await db.query(`insert into project_members (project_id, user_id) values ($1, $2)`, [P["Bangkok Central 2"].project_id, user]);
+    await db.query(`insert into auth.users (id) values ($1)`, [user]);
+    await db.query(`insert into organization_memberships (organization_id, user_id, role) values ($1, $2, 'member')`, [orgId, user]);
+    await db.query(`insert into project_memberships (project_id, user_id, role) values ($1, $2, 'viewer')`, [P["Bangkok Central 2"].project_id, user]);
     const seen = await db.tx(async (q) => {
       await q.query(`select set_config('request.jwt.claim.sub', $1, true)`, [user]);
       await q.query(`set local role authenticated`);

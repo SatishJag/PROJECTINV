@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { migrate, pgliteDb, type Db } from "../src/db.js";
-import { AzureBlobFileStore, boqFileKey, FileStoreError, LocalFileStore, moveLegacyFiles, type FileStore } from "../src/filestore.js";
+import { AzureBlobFileStore, boqFileKey, FileStoreError, LocalFileStore, type FileStore } from "../src/filestore.js";
 import { DemoProcoreAdapter } from "../src/procore.js";
 import { ensureOrganization, syncFromProcore } from "../src/sync.js";
 import { bc1Boq } from "../scripts/samples.js";
@@ -98,7 +98,7 @@ describe("BOQ originals live in the file store, not in Postgres", () => {
     const res = await app.inject({ method: "POST", url: `/api/projects/${projectId}/boq`, payload: { fileName: "BC1_MEP_BOQ_RevA.xlsx", contentBase64: content.toString("base64") } });
     expect(res.statusCode).toBe(200);
     const rev = (await db.query(`select * from boq_document_revisions where boq_revision_id = $1`, [res.json().revisionId])).rows[0]!;
-    expect(rev).toMatchObject({ storage_kind: "azure-blob", file_content: null, file_size: content.length, file_hash: sha(content) });
+    expect(rev).toMatchObject({ storage_kind: "azure-blob", file_size: content.length, file_hash: sha(content) });
     expect(rev.storage_key).toBe(boqFileKey(rev.organization_id, projectId, sha(content)));
     expect((await store.get(rev.storage_key, rev.file_hash)).equals(content)).toBe(true);
 
@@ -107,24 +107,7 @@ describe("BOQ originals live in the file store, not in Postgres", () => {
     expect(dl.rawPayload.equals(content)).toBe(true);
   });
 
-  it("moves files stored in the database before the file store existed", async () => {
-    const content = await bc1Boq({ upsCableQty: 1 });
-    const res = await app.inject({ method: "POST", url: `/api/projects/${projectId}/boq`, payload: { fileName: "legacy.xlsx", contentBase64: content.toString("base64") } });
-    const id = res.json().revisionId;
-    // Make it look like a row written by the old code.
-    await db.query(`update boq_document_revisions set file_content = $2, storage_kind = null, storage_key = null where boq_revision_id = $1`, [id, content]);
-    const legacy = await app.inject({ method: "GET", url: `/api/boq/${id}/file` });
-    expect(legacy.rawPayload.equals(content)).toBe(true);
-
-    expect(await moveLegacyFiles(db, store)).toBe(1);
-    expect(await moveLegacyFiles(db, store)).toBe(0);
-    const rev = (await db.query(`select storage_kind, storage_key, file_content from boq_document_revisions where boq_revision_id = $1`, [id])).rows[0]!;
-    expect(rev).toMatchObject({ storage_kind: "azure-blob", file_content: null });
-    const dl = await app.inject({ method: "GET", url: `/api/boq/${id}/file` });
-    expect(dl.rawPayload.equals(content)).toBe(true);
-  });
-
   it("the database refuses a revision with no original kept anywhere", async () => {
-    await expect(db.query(`update boq_document_revisions set storage_key = null, file_content = null`)).rejects.toThrow(/boq_revision_original_kept/);
+    await expect(db.query(`update boq_document_revisions set storage_key = null`)).rejects.toThrow(/boq_revision_original_kept/);
   });
 });

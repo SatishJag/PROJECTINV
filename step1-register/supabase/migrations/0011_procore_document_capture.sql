@@ -45,7 +45,7 @@ create table procore_document_captures (
   updated_at timestamptz not null default now(),
   record_version integer not null default 1,
   unique (project_id, procore_file_id, procore_file_version),
-  foreign key (boq_revision_id, project_id) references boq_document_revisions (boq_revision_id, project_id)
+  foreign key (project_id, boq_revision_id) references boq_document_revisions (project_id, boq_revision_id)
 );
 create index procore_captures_project on procore_document_captures (project_id, detected_at desc);
 create index procore_captures_file on procore_document_captures (project_id, procore_file_id);
@@ -76,11 +76,12 @@ alter table procore_document_watches enable row level security;
 alter table procore_document_captures enable row level security;
 alter table procore_webhook_events enable row level security;
 
+-- Signed-in users read their projects' capture state; the capture worker writes it (service role / owner).
 grant select on procore_document_watches, procore_document_captures, procore_webhook_events to authenticated;
 
 create policy member_read on procore_document_watches for select to authenticated
-  using (project_id in (select app_member_project_ids()));
+  using (project_id in (select current_project_ids()));
 create policy member_read on procore_document_captures for select to authenticated
-  using (project_id in (select app_member_project_ids()));
+  using (project_id in (select current_project_ids()));
 create policy member_read on procore_webhook_events for select to authenticated
-  using (project_id in (select app_member_project_ids()));
+  using (project_id in (select current_project_ids()));

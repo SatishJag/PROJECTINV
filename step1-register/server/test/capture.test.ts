@@ -78,7 +78,7 @@ describe("BOQ stored in Procore Documents is captured automatically", () => {
     ]);
     expect(ups[0].ordered_quantity).toBeNull();
     const detail = (await api("GET", `/api/register/${ups[0].inventory_record_id}`)).body;
-    expect(detail.sources[0]).toMatchObject({ source_tool: "procore_documents", procore_document_id: s.fileId, source_revision: "1", source_locator: "Mechanical!R12" });
+    expect(detail.sources[0]).toMatchObject({ source_tool: "procore", procore_document_id: s.fileId, source_revision: "1", source_locator: "Mechanical!R12" });
   });
 
   it("ignores a redelivered webhook and an unchanged folder", async () => {
@@ -97,9 +97,9 @@ describe("BOQ stored in Procore Documents is captured automatically", () => {
     expect(s.fileId).toBe(fileA);
     await deliver(webhook("Bangkok Central 1", s.fileId, "update"));
     const c = await captures("Bangkok Central 1");
-    expect(c.find((x) => x.procore_file_version === "2")).toMatchObject({ status: "captured", document_status: "current" });
+    expect(c.find((x) => x.procore_file_version === "2")).toMatchObject({ status: "captured", document_status: "accepted" });
     const revs = await revisions("Bangkok Central 1");
-    expect(revs.map((r) => r.document_status).sort()).toEqual(["current", "superseded"]);
+    expect(revs.map((r) => r.document_status).sort()).toEqual(["accepted", "superseded"]);
     expect((await register("Bangkok Central 1", "UPS")).map((x) => Number(x.boq_quantity))).toEqual([900, 4]);
   });
 
@@ -107,7 +107,7 @@ describe("BOQ stored in Procore Documents is captured automatically", () => {
     const s = await store("Bangkok Central 1", "BOQ", "BC1_MEP_BOQ_RevB.xlsx", bc1Boq({ upsCableQty: 950 }));
     expect(s.fileId).not.toBe(fileA);
     await deliver(webhook("Bangkok Central 1", s.fileId));
-    const current = (await revisions("Bangkok Central 1")).filter((r) => r.document_status === "current");
+    const current = (await revisions("Bangkok Central 1")).filter((r) => r.document_status === "accepted");
     expect(current.map((r) => r.file_name)).toEqual(["BC1_MEP_BOQ_RevB.xlsx"]);
     expect((await register("Bangkok Central 1", "UPS")).map((x) => Number(x.boq_quantity))).toEqual([950, 4]);
   });
@@ -118,7 +118,7 @@ describe("BOQ stored in Procore Documents is captured automatically", () => {
     expect((await captures("Bangkok Central 2"))[0]).toMatchObject({ status: "captured" });
     expect((await register("Bangkok Central 2")).length).toBeGreaterThan(0);
     expect((await register("Bangkok Central 1", "UPS")).map((x) => Number(x.boq_quantity))).toEqual([950, 4]);
-    const bc1Sources = await db.query(`select count(*)::int as n from boq_document_revisions where project_id = $1 and file_name like 'BC2%'`, [P["Bangkok Central 1"].project_id]);
+    const bc1Sources = await db.query(`select count(*)::int as n from boq_document_revisions where project_id = $1 and source_file_name like 'BC2%'`, [P["Bangkok Central 1"].project_id]);
     expect(bc1Sources.rows[0]!.n).toBe(0);
   });
 

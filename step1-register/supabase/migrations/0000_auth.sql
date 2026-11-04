@@ -1,4 +1,4 @@
--- Stand-in for the Supabase `auth` schema on plain Postgres (local and Azure).
+-- The `auth` schema the policies use, on plain Postgres (Azure, local, PGlite). Idempotent, so it also runs on Supabase.
 -- The API sets request.jwt.claim.sub to the signed-in user's id for each request.
 create schema if not exists auth;
 create table if not exists auth.users (id uuid primary key);

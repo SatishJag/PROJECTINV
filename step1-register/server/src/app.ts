@@ -8,7 +8,7 @@ import { z } from "zod";
 import type { Db } from "./db.js";
 import { FileStoreError, type FileStore } from "./filestore.js";
 import { DemoProcoreAdapter, type ProcoreAdapter } from "./procore.js";
-import { audit, syncFromProcore } from "./sync.js";
+import { audit, syncFromProcore, writeSegments } from "./sync.js";
 import {
   getWatch,
   listCaptures,
@@ -74,7 +74,7 @@ export async function buildApp(deps: AppDeps) {
     const r = (
       await db.query(
         `select boq_revision_id, project_id, document_key, source_tool, procore_company_id, procore_project_id, procore_document_id, source_revision,
-                file_name, mime_type, file_hash, file_size, declared_project_name, project_conflict, submitted_by, submitted_at, document_status,
+                source_file_name as file_name, mime_type, file_hash, file_size, declared_project_name, project_conflict, submitted_by, submitted_at, document_status,
                 processing_status, processing_messages, supersedes_revision_id
          from boq_document_revisions where boq_revision_id = $1 and organization_id = $2`,
         [id, organizationId],
@@ -112,10 +112,10 @@ export async function buildApp(deps: AppDeps) {
         `select p.*,
            (select count(*)::int from work_packages w where w.project_id = p.project_id) as work_packages,
            (select count(*)::int from cost_assignments c where c.project_id = p.project_id) as cost_assignments,
-           (select count(*)::int from boq_document_revisions d where d.project_id = p.project_id and d.document_status = 'current') as boq_documents,
+           (select count(*)::int from boq_document_revisions d where d.project_id = p.project_id and d.document_status = 'accepted') as boq_documents,
            (select count(*)::int from inventory_register r where r.project_id = p.project_id and r.source_line_count > 0) as inventory_records,
            (select count(*)::int from boq_lines l join boq_document_revisions d on d.boq_revision_id = l.boq_revision_id
-              where l.project_id = p.project_id and d.document_status = 'current' and l.line_kind = 'item'
+              where l.project_id = p.project_id and d.document_status = 'accepted' and l.line_type = 'item'
                 and (l.mapping_status in ('unresolved', 'unmapped', 'proposed') or (l.validation_status = 'invalid' and l.mapping_status <> 'rejected'))) as open_exceptions
          from projects p where p.organization_id = $1 order by p.project_name`,
         [organizationId],
@@ -134,8 +134,8 @@ export async function buildApp(deps: AppDeps) {
     const p = await projectOr404(req.params.id);
     const b = z.object({ code: z.string().trim().min(1), name: z.string().trim().min(1), parentWorkPackageId: uuid.nullish(), matchTerms: z.array(z.string().trim().min(1)).default([]) }).parse(req.body);
     const r = await db.query(
-      `insert into work_packages (organization_id, project_id, parent_work_package_id, code, name, match_terms, created_by) values ($1, $2, $3, $4, $5, $6, $7) returning *`,
-      [organizationId, p.project_id, b.parentWorkPackageId ?? null, b.code, b.name, b.matchTerms, actorOf(req)],
+      `insert into work_packages (project_id, parent_work_package_id, code, name, match_terms, status, created_by) values ($1, $2, $3, $4, $5, 'active', $6) returning *`,
+      [p.project_id, b.parentWorkPackageId ?? null, b.code, b.name, b.matchTerms, actorOf(req)],
     );
     await audit(db, { organizationId, projectId: p.project_id, actor: actorOf(req), action: "work_package.created", entity: "work_package", entityId: r.rows[0]!.work_package_id, detail: b });
     return r.rows[0];
@@ -145,8 +145,8 @@ export async function buildApp(deps: AppDeps) {
     uuid.parse(req.params.id);
     const b = z.object({ name: z.string().trim().min(1).optional(), matchTerms: z.array(z.string().trim().min(1)).optional(), status: z.enum(["active", "inactive"]).optional() }).parse(req.body);
     const r = await db.query(
-      `update work_packages set name = coalesce($3, name), match_terms = coalesce($4, match_terms), status = coalesce($5, status), updated_at = now(), record_version = record_version + 1
-       where work_package_id = $1 and organization_id = $2 returning *`,
+      `update work_packages set name = coalesce($3, name), match_terms = coalesce($4, match_terms), status = coalesce($5, status)
+       where work_package_id = $1 and project_id in (select project_id from projects where organization_id = $2) returning *`,
       [req.params.id, organizationId, b.name ?? null, b.matchTerms ?? null, b.status ?? null],
     );
     if (!r.rows[0]) throw new InputError("Work package not found", 404);
@@ -158,10 +158,11 @@ export async function buildApp(deps: AppDeps) {
     const p = await projectOr404(req.params.id);
     const b = z.object({ workPackageId: uuid, costCode: z.string().trim().min(1), costType: z.string().trim().nullish(), budgetCode: z.string().trim().nullish(), description: z.string().nullish() }).parse(req.body);
     const r = await db.query(
-      `insert into cost_assignments (organization_id, project_id, work_package_id, cost_code, cost_type, budget_code, description, created_by)
-       values ($1, $2, $3, $4, $5, $6, $7, $8) returning *`,
-      [organizationId, p.project_id, b.workPackageId, b.costCode, b.costType ?? null, b.budgetCode ?? [b.costCode, b.costType].filter(Boolean).join("."), b.description ?? null, actorOf(req)],
+      `insert into cost_assignments (project_id, work_package_id, cost_code, cost_type, budget_code, description, status, created_by)
+       values ($1, $2, $3, $4, $5, $6, 'approved', $7) returning *`,
+      [p.project_id, b.workPackageId, b.costCode, b.costType ?? null, b.budgetCode ?? [b.costCode, b.costType].filter(Boolean).join("."), b.description ?? null, actorOf(req)],
     );
+    await writeSegments(db, organizationId, p.project_id, r.rows[0]!.cost_assignment_id, b.costCode, b.costType ?? null, []);
     await audit(db, { organizationId, projectId: p.project_id, actor: actorOf(req), action: "cost_assignment.created", entity: "cost_assignment", entityId: r.rows[0]!.cost_assignment_id, detail: b });
     return r.rows[0];
   });
@@ -187,17 +188,17 @@ export async function buildApp(deps: AppDeps) {
       await db.query(
         `select a.allocation_id, a.allocated_quantity, a.approval_status, a.basis, a.approved_by, a.approved_at,
                 l.boq_line_id, l.source_locator, l.sheet_name, l.row_number, l.page_number, l.section_path, l.raw_item_code, l.raw_description,
-                l.raw_specification, l.raw_quantity, l.raw_uom, l.raw_wbs_reference, l.raw_cost_code, l.quantity as line_quantity,
-                d.boq_revision_id, d.file_name, d.source_tool, d.procore_document_id, d.source_revision, d.document_status, d.submitted_at, d.file_hash
+                l.raw_specification, l.raw_quantity, l.raw_uom, l.stated_wbs_reference as raw_wbs_reference, l.stated_cost_code as raw_cost_code, l.normalized_quantity as line_quantity,
+                d.boq_revision_id, d.source_file_name as file_name, d.source_tool, d.procore_document_id, d.source_revision, d.document_status, d.submitted_at, d.file_hash
          from requirement_boq_allocations a join boq_lines l on l.boq_line_id = a.boq_line_id join boq_document_revisions d on d.boq_revision_id = l.boq_revision_id
-         where a.inventory_record_id = $1 order by d.submitted_at desc, l.source_locator`,
+         where a.inventory_record_id = $1 and a.approval_status <> 'rejected' order by d.submitted_at desc, l.source_locator`,
         [req.params.id],
       )
     ).rows;
     return { record: rec, sources };
   });
 
-  const submit = async (req: FastifyRequest, projectId: string, f: { fileName: string; mimeType: string | null; content: Buffer }, fields: Record<string, string | undefined>, sourceTool: "upload" | "procore_documents") => {
+  const submit = async (req: FastifyRequest, projectId: string, f: { fileName: string; mimeType: string | null; content: Buffer }, fields: Record<string, string | undefined>, sourceTool: "upload" | "procore") => {
     const result = await submitBoq(db, files, organizationId, {
       projectId,
       ...f,
@@ -240,14 +241,14 @@ export async function buildApp(deps: AppDeps) {
     const b = z.object({ documentId: z.string().trim().min(1) }).parse(req.body);
     if (!p.procore_project_id) throw new InputError("This project is not linked to a Procore project");
     const f = await procore.downloadDocument(Number(p.procore_project_id), b.documentId);
-    return submit(req, p.project_id, f, { procoreDocumentId: b.documentId, sourceRevision: f.revision ?? undefined }, "procore_documents");
+    return submit(req, p.project_id, f, { procoreDocumentId: b.documentId, sourceRevision: f.revision ?? undefined }, "procore");
   });
 
   app.get<{ Params: { id: string } }>("/api/projects/:id/boq", async (req) => {
     const p = await projectOr404(req.params.id);
     const revs = (
       await db.query(
-        `select boq_revision_id, document_key, source_tool, procore_document_id, source_revision, file_name, file_size, declared_project_name, project_conflict,
+        `select boq_revision_id, document_key, source_tool, procore_document_id, source_revision, source_file_name as file_name, file_size, declared_project_name, project_conflict,
                 submitted_by, submitted_at, document_status, processing_status, supersedes_revision_id
          from boq_document_revisions where project_id = $1 order by submitted_at desc`,
         [p.project_id],
@@ -260,32 +261,33 @@ export async function buildApp(deps: AppDeps) {
     const rev = await revisionOr404(req.params.id);
     const lines = (
       await db.query(
-        `select l.*, u.code as uom_code, w.code as work_package_code, w.name as work_package_name, c.budget_code,
+        `select l.*, l.line_type as line_kind, l.normalized_quantity as quantity, l.normalized_uom_id as uom_id, l.stated_wbs_reference as raw_wbs_reference, l.stated_cost_code as raw_cost_code, u.code as uom_code, w.code as work_package_code, w.name as work_package_name, c.budget_code, (select coalesce(json_agg(json_build_object('mapping_exception_id', e.mapping_exception_id, 'exception_type', e.exception_type, 'detail', e.exception_detail, 'state', e.state)), '[]') from mapping_exceptions e where e.boq_line_id = l.boq_line_id and e.state in ('open', 'in_review')) as open_exceptions,
             (select coalesce(json_agg(json_build_object('quantity', a.allocated_quantity, 'record_number', r.record_number, 'inventory_record_id', r.inventory_record_id,
                      'work_package', w2.name, 'budget_code', c2.budget_code)), '[]')
              from requirement_boq_allocations a join inventory_requirements r on r.inventory_record_id = a.inventory_record_id
              join work_packages w2 on w2.work_package_id = r.work_package_id join cost_assignments c2 on c2.cost_assignment_id = r.cost_assignment_id
              where a.boq_line_id = l.boq_line_id and a.approval_status = 'approved') as allocations
-         from boq_lines l left join units_of_measure u on u.uom_id = l.uom_id left join work_packages w on w.work_package_id = l.proposed_work_package_id
+         from boq_lines l left join units_of_measure u on u.uom_id = l.normalized_uom_id left join work_packages w on w.work_package_id = l.proposed_work_package_id
          left join cost_assignments c on c.cost_assignment_id = l.proposed_cost_assignment_id
          where l.boq_revision_id = $1 order by l.sheet_name nulls first, l.page_number nulls first, l.row_number`,
         [rev.boq_revision_id],
       )
     ).rows;
-    return { revision: rev, reconciliation: await reconciliation(db, rev.boq_revision_id), lines };
+    const ingestionRuns = (await db.query(`select * from ingestion_runs where boq_revision_id = $1 order by started_at`, [rev.boq_revision_id])).rows;
+    return { revision: rev, reconciliation: await reconciliation(db, rev.boq_revision_id), ingestionRuns, lines };
   });
 
   app.get<{ Params: { id: string } }>("/api/boq/:id/file", async (req, reply: FastifyReply) => {
     const rev = await revisionOr404(req.params.id);
     const f = (
-      await db.query<{ storage_kind: string | null; storage_key: string | null; file_content: Buffer | null }>(
-        `select storage_kind, storage_key, case when storage_key is null then file_content end as file_content from boq_document_revisions where boq_revision_id = $1`,
+      await db.query<{ storage_kind: string | null; storage_key: string | null }>(
+        `select storage_kind, storage_key from boq_document_revisions where boq_revision_id = $1`,
         [rev.boq_revision_id],
       )
     ).rows[0]!;
     reply.header("content-type", rev.mime_type || "application/octet-stream");
     reply.header("content-disposition", `attachment; filename="${String(rev.file_name).replace(/["\\\r\n]/g, "")}"`);
-    if (!f.storage_key) return reply.send(Buffer.from(f.file_content!)); // stored before the file store existed
+    if (!f.storage_key) throw new FileStoreError("The original file of this revision is not in the file store");
     if (f.storage_kind !== files.kind) throw new FileStoreError(`This file is in the "${f.storage_kind}" store, but this server uses "${files.kind}"`);
     if (rev.file_size) reply.header("content-length", String(rev.file_size));
     return reply.send(await files.open(f.storage_key));
@@ -302,11 +304,11 @@ export async function buildApp(deps: AppDeps) {
     const p = await projectOr404(req.params.id);
     const rows = (
       await db.query(
-        `select l.*, u.code as uom_code, d.file_name, d.source_revision, d.project_conflict, w.name as work_package_name, c.budget_code
+        `select l.*, l.line_type as line_kind, l.normalized_quantity as quantity, l.normalized_uom_id as uom_id, l.stated_wbs_reference as raw_wbs_reference, l.stated_cost_code as raw_cost_code, (select coalesce(json_agg(json_build_object('mapping_exception_id', e.mapping_exception_id, 'exception_type', e.exception_type, 'detail', e.exception_detail, 'state', e.state)), '[]') from mapping_exceptions e where e.boq_line_id = l.boq_line_id and e.state in ('open', 'in_review')) as open_exceptions, u.code as uom_code, d.source_file_name as file_name, d.source_revision, d.project_conflict, w.name as work_package_name, c.budget_code
          from boq_lines l join boq_document_revisions d on d.boq_revision_id = l.boq_revision_id
-         left join units_of_measure u on u.uom_id = l.uom_id left join work_packages w on w.work_package_id = l.proposed_work_package_id
+         left join units_of_measure u on u.uom_id = l.normalized_uom_id left join work_packages w on w.work_package_id = l.proposed_work_package_id
          left join cost_assignments c on c.cost_assignment_id = l.proposed_cost_assignment_id
-         where l.project_id = $1 and d.document_status = 'current' and l.line_kind = 'item'
+         where l.project_id = $1 and d.document_status = 'accepted' and l.line_type = 'item'
            and (l.mapping_status in ('unresolved', 'unmapped', 'proposed') or (l.validation_status = 'invalid' and l.mapping_status <> 'rejected'))
          order by d.submitted_at desc, l.sheet_name nulls first, l.page_number nulls first, l.row_number`,
         [p.project_id],
@@ -337,7 +339,7 @@ export async function buildApp(deps: AppDeps) {
   app.get("/api/items", async () =>
     (
       await db.query(
-        `select i.*, u.code as base_uom,
+        `select i.*, i.specification_text as specification, i.specification as attributes, case i.tracking_mode when 'bulk' then 'quantity' when 'batch' then 'lot' else i.tracking_mode end as tracking_mode, u.code as base_uom,
            (select coalesce(json_agg(json_build_object('project_name', x.project_name, 'work_package', x.work_package_name, 'record_number', x.record_number,
                     'boq_quantity', x.boq_quantity, 'uom', x.normalized_uom) order by x.project_name, x.work_package_name), '[]')
             from inventory_register x where x.item_id = i.item_id and x.source_line_count > 0) as usage
@@ -359,9 +361,10 @@ export async function buildApp(deps: AppDeps) {
       .parse(req.body);
     const r = await db.query(
       `update item_definitions set verification_status = coalesce($3, verification_status), category = coalesce($4, category), tracking_mode = coalesce($5, tracking_mode),
-          manufacturer_part_number = coalesce($6, manufacturer_part_number), updated_at = now(), record_version = record_version + 1
-       where item_id = $1 and organization_id = $2 returning *`,
-      [req.params.id, organizationId, b.verificationStatus ?? null, b.category ?? null, b.trackingMode ?? null, b.manufacturerPartNumber ?? null],
+          manufacturer_part_number = coalesce($6, manufacturer_part_number)
+       where item_id = $1 and organization_id = $2
+       returning *, specification_text as specification, specification as attributes, case tracking_mode when 'bulk' then 'quantity' when 'batch' then 'lot' else tracking_mode end as tracking_mode`,
+      [req.params.id, organizationId, b.verificationStatus ?? null, b.category ?? null, b.trackingMode ? ({ quantity: "bulk", lot: "batch", serialized: "serialized" } as const)[b.trackingMode] : null, b.manufacturerPartNumber ?? null],
     );
     if (!r.rows[0]) throw new InputError("Item not found", 404);
     await audit(db, { organizationId, actor: actorOf(req), action: "item.updated", entity: "item_definition", entityId: req.params.id, detail: b });
@@ -447,7 +450,7 @@ export async function buildApp(deps: AppDeps) {
     return { stored, event, watch: await getWatch(db, p.project_id), captures: await listCaptures(db, p.project_id) };
   });
 
-  app.get("/api/units", async () => (await db.query(`select uom_id, code, name, measurement_dimension, aliases from units_of_measure order by measurement_dimension, code`)).rows);
+  app.get("/api/units", async () => (await db.query(`select uom_id, code, name, measurement_dimension, aliases from units_of_measure where organization_id = $1 order by measurement_dimension, code`, [organizationId])).rows);
 
   const dist = deps.webDist ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web/dist");
   if (fs.existsSync(dist)) {
