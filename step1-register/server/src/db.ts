@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
 
 export interface Queryable {
@@ -88,4 +89,41 @@ export async function migrate(db: Db, log: (m: string) => void = () => {}) {
     await db.exec(`${sql}\n;insert into schema_migrations (version) values ('${f.replace(/'/g, "''")}');`);
     log(`migration applied: ${f}`);
   }
+}
+
+/**
+ * Per-request database identity. Inside `asUser(userId, fn)` every query runs as the `authenticated` role with
+ * request.jwt.claim.sub = userId, so row-level security decides what the signed-in user can read and write.
+ * Outside it (startup, Procore sync, capture worker) queries run as the service connection.
+ */
+const identity = new AsyncLocalStorage<{ userId: string | null }>();
+export const asUser = <T>(userId: string, fn: () => T) => identity.run({ userId }, fn);
+export const asService = <T>(fn: () => T) => identity.run({ userId: null }, fn);
+export const currentUserId = () => identity.getStore()?.userId ?? null;
+
+export function userScoped(base: Db): Db {
+  const enter = async (q: Queryable, userId: string) => {
+    await q.query(`select set_config('request.jwt.claim.sub', $1, true)`, [userId]);
+    await q.query(`set local role authenticated`);
+  };
+  return {
+    query: (text, params) => {
+      const userId = currentUserId();
+      if (!userId) return base.query(text, params);
+      return base.tx(async (q) => {
+        await enter(q, userId);
+        return q.query(text, params);
+      });
+    },
+    tx: (fn) => {
+      const userId = currentUserId();
+      if (!userId) return base.tx(fn);
+      return base.tx(async (q) => {
+        await enter(q, userId);
+        return fn(q);
+      });
+    },
+    exec: (sql) => base.exec(sql),
+    close: () => base.close(),
+  };
 }

@@ -5,7 +5,8 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { z } from "zod";
-import type { Db } from "./db.js";
+import { asService, asUser, userScoped, type Db } from "./db.js";
+import type { Authenticator, SignedInUser } from "./auth.js";
 import { FileStoreError, type FileStore } from "./filestore.js";
 import { DemoProcoreAdapter, type ProcoreAdapter } from "./procore.js";
 import { audit, syncFromProcore, writeSegments } from "./sync.js";
@@ -30,6 +31,8 @@ export interface AppDeps {
   procore: ProcoreAdapter;
   organizationId: string;
   appPassword?: string | null;
+  /** OpenID Connect sign-in (Entra ID). When set, every API request carries the user's token and runs under RLS as that user. */
+  auth?: Authenticator | null;
   webDist?: string | null;
   /** Value Procore sends as "Authorization: Bearer <secret>" on webhook deliveries; webhooks are refused without it. */
   webhookSecret?: string | null;
@@ -38,16 +41,50 @@ export interface AppDeps {
 const uuid = z.string().uuid();
 
 export async function buildApp(deps: AppDeps) {
-  const { db, procore, organizationId, files } = deps;
+  const { procore, organizationId, files } = deps;
+  const base = deps.db;
+  // Queries run as the signed-in user (role `authenticated`, RLS applies) inside a request, as the service otherwise.
+  const db = userScoped(base);
   const app = Fastify({ logger: false, bodyLimit: 60 * 1024 * 1024 });
   await app.register(multipart, { limits: { fileSize: 50 * 1024 * 1024, files: 1 } });
 
-  const actorOf = (req: FastifyRequest) => String(req.headers["x-user-name"] ?? "").trim().slice(0, 120) || "user";
+  const userOf = (req: FastifyRequest) => (req as FastifyRequest & { user?: SignedInUser }).user ?? null;
+  const actorOf = (req: FastifyRequest) => userOf(req)?.name ?? (String(req.headers["x-user-name"] ?? "").trim().slice(0, 120) || "user");
+  const isPublic = (url: string) => !url.startsWith("/api/") || url === "/api/health" || url === "/api/config" || url.startsWith("/api/procore/webhooks");
 
   app.addHook("onRequest", async (req, reply) => {
-    if (!deps.appPassword || !req.url.startsWith("/api/") || req.url === "/api/health" || req.url.startsWith("/api/procore/webhooks")) return;
-    if (req.headers.authorization !== `Bearer ${deps.appPassword}`) return reply.code(401).send({ error: "Sign in required" });
+    if (isPublic(req.url)) return;
+    if (deps.auth) {
+      const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
+      if (!token) return reply.code(401).send({ error: "Sign in required" });
+      let user: SignedInUser;
+      try {
+        user = await deps.auth.verify(token);
+      } catch {
+        return reply.code(401).send({ error: "Sign-in token is not valid" });
+      }
+      await base.query(`insert into auth.users (id) values ($1) on conflict (id) do nothing`, [user.userId]);
+      if (deps.auth.ownerUserIds.includes(user.userId)) {
+        await base.query(`insert into organization_memberships (organization_id, user_id, role, created_by) values ($1, $2, 'owner', 'system:bootstrap') on conflict (organization_id, user_id) do nothing`, [organizationId, user.userId]);
+      }
+      (req as FastifyRequest & { user?: SignedInUser }).user = user;
+      return;
+    }
+    if (deps.appPassword && req.headers.authorization !== `Bearer ${deps.appPassword}`) return reply.code(401).send({ error: "Sign in required" });
   });
+  // The handler (and everything it awaits) runs with the signed-in user's database identity.
+  app.addHook("preHandler", (req, _reply, done) => {
+    const u = userOf(req);
+    if (u) asUser(u.userId, done);
+    else done();
+  });
+  /** Organization owners and admins manage Procore sync and memberships. */
+  const requireOrgAdmin = async (req: FastifyRequest) => {
+    const u = userOf(req);
+    if (!u) return;
+    const m = (await db.query<{ role: string }>(`select role from organization_memberships where organization_id = $1 and user_id = $2 and is_active`, [organizationId, u.userId])).rows[0];
+    if (!m || !["owner", "admin"].includes(m.role)) throw new InputError("Only organization owners and admins can do this", 403);
+  };
 
   app.setErrorHandler((err: any, _req, reply) => {
     if (err instanceof InputError) return reply.code(err.status).send({ error: err.message });
@@ -57,6 +94,7 @@ export async function buildApp(deps: AppDeps) {
       return reply.code(502).send({ error: err.message });
     }
     if (err instanceof z.ZodError) return reply.code(400).send({ error: err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+    if (err?.code === "42501") return reply.code(403).send({ error: "Not allowed for your project or organization role" });
     if (err?.code && /^(23|22|P0)/.test(String(err.code))) return reply.code(409).send({ error: err.message });
     if (err?.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({ error: err.message });
     console.error(err);
@@ -97,13 +135,15 @@ export async function buildApp(deps: AppDeps) {
   app.get("/api/config", async () => ({
     procoreMode: procore.mode,
     procoreCompanyId: procore.companyId,
-    passwordRequired: !!deps.appPassword,
+    passwordRequired: !deps.auth && !!deps.appPassword,
+    signIn: deps.auth ? "oidc" : deps.appPassword ? "password" : "none",
     webhooksConfigured: !!deps.webhookSecret,
   }));
 
   app.post("/api/procore/sync", async (req) => {
     const body = z.object({ procoreProjectId: z.number().int().optional() }).parse(req.body ?? {});
-    return syncFromProcore(db, procore, organizationId, actorOf(req), body.procoreProjectId);
+    await requireOrgAdmin(req);
+    return asService(() => syncFromProcore(base, procore, organizationId, actorOf(req), body.procoreProjectId));
   });
 
   app.get("/api/projects", async () =>
@@ -405,7 +445,7 @@ export async function buildApp(deps: AppDeps) {
     const b = z
       .object({ enabled: z.boolean().optional(), folderId: z.string().trim().min(1).nullable().optional(), folderPath: z.string().trim().nullish(), includeSubfolders: z.boolean().optional() })
       .parse(req.body ?? {});
-    return { watch: await setWatch(db, organizationId, p.project_id, b, actorOf(req)) };
+    return { watch: await asService(() => setWatch(db, organizationId, p.project_id, b, actorOf(req))) };
   });
 
   /** Browse the project's Procore Documents folders (to choose the folder to watch). */
@@ -419,7 +459,7 @@ export async function buildApp(deps: AppDeps) {
   /** "Check Procore now": scan the watched folder immediately. */
   app.post<{ Params: { id: string } }>("/api/projects/:id/procore-scan", async (req) => {
     const p = await projectOr404(req.params.id);
-    const result = await scanProject(capture, p.project_id, "manual");
+    const result = await asService(() => scanProject(capture, p.project_id, "manual"));
     return { result, watch: await getWatch(db, p.project_id), captures: await listCaptures(db, p.project_id) };
   });
 
@@ -433,10 +473,10 @@ export async function buildApp(deps: AppDeps) {
     const b = z
       .object({ fileName: z.string().trim().min(1), contentBase64: z.string().min(1), folderPath: z.string().trim().default("BOQ"), mimeType: z.string().nullish(), sendWebhook: z.boolean().default(true) })
       .parse(req.body);
-    const stored = procore.storeDocument(Number(p.procore_project_id), b.folderPath, b.fileName, Buffer.from(b.contentBase64, "base64"), b.mimeType ?? null);
+    const stored = await asService(() => procore.storeDocument(Number(p.procore_project_id), b.folderPath, b.fileName, Buffer.from(b.contentBase64, "base64"), b.mimeType ?? null));
     let event = null;
     if (b.sendWebhook) {
-      const r = await recordWebhook(capture, {
+      const r = await asService(() => recordWebhook(capture, {
         ulid: `demo-${stored.fileId}-${stored.version}-${Date.now()}`,
         company_id: procore.companyId,
         project_id: Number(p.procore_project_id),
@@ -444,10 +484,51 @@ export async function buildApp(deps: AppDeps) {
         resource_id: stored.fileId,
         event_type: stored.version === "1" ? "create" : "update",
         api_version: "v2",
-      });
-      event = r.eventId ? await processWebhook(capture, r.eventId) : null;
+      }));
+      event = r.eventId ? await asService(() => processWebhook(capture, r.eventId!)) : null;
     }
     return { stored, event, watch: await getWatch(db, p.project_id), captures: await listCaptures(db, p.project_id) };
+  });
+
+  // ---------------------------------------------------------------- signed-in user and memberships
+
+  app.get("/api/me", async (req) => {
+    const u = userOf(req);
+    if (!u) return { user: null, signIn: deps.auth ? "oidc" : deps.appPassword ? "password" : "none" };
+    const org = (await db.query<{ role: string }>(`select role from organization_memberships where organization_id = $1 and user_id = $2 and is_active`, [organizationId, u.userId])).rows[0];
+    const projects = (
+      await db.query(`select m.project_id, p.project_name, m.role from project_memberships m join projects p using (project_id) where m.user_id = $1 and m.is_active order by p.project_name`, [u.userId])
+    ).rows;
+    return { user: u, organizationRole: org?.role ?? null, projects };
+  });
+
+  /** Add or change someone's organization membership (owners only; the database policy enforces it). */
+  app.put<{ Params: { userId: string } }>("/api/members/:userId", async (req) => {
+    const userId = uuid.parse(req.params.userId).toLowerCase();
+    const b = z.object({ role: z.enum(["owner", "admin", "member", "viewer"]), active: z.boolean().default(true) }).parse(req.body);
+    await asService(() => base.query(`insert into auth.users (id) values ($1) on conflict (id) do nothing`, [userId]));
+    const r = await db.query(
+      `insert into organization_memberships (organization_id, user_id, role, is_active, created_by) values ($1, $2, $3, $4, $5)
+       on conflict (organization_id, user_id) do update set role = excluded.role, is_active = excluded.is_active returning *`,
+      [organizationId, userId, b.role, b.active, actorOf(req)],
+    );
+    await audit(db, { organizationId, actor: actorOf(req), action: "organization_member.set", entity: "organization_membership", entityId: userId, detail: b });
+    return r.rows[0];
+  });
+
+  /** Add or change someone's access to a project (organization owners and admins; enforced by the database policy). */
+  app.put<{ Params: { id: string; userId: string } }>("/api/projects/:id/members/:userId", async (req) => {
+    const p = await projectOr404(req.params.id);
+    const userId = uuid.parse(req.params.userId).toLowerCase();
+    const b = z.object({ role: z.enum(["admin", "engineer", "procurement", "finance", "viewer"]), active: z.boolean().default(true) }).parse(req.body);
+    await asService(() => base.query(`insert into auth.users (id) values ($1) on conflict (id) do nothing`, [userId]));
+    const r = await db.query(
+      `insert into project_memberships (project_id, user_id, role, is_active, created_by) values ($1, $2, $3, $4, $5)
+       on conflict (project_id, user_id) do update set role = excluded.role, is_active = excluded.is_active returning *`,
+      [p.project_id, userId, b.role, b.active, actorOf(req)],
+    );
+    await audit(db, { organizationId, projectId: p.project_id, actor: actorOf(req), action: "project_member.set", entity: "project_membership", entityId: userId, detail: b });
+    return r.rows[0];
   });
 
   app.get("/api/units", async () => (await db.query(`select uom_id, code, name, measurement_dimension, aliases from units_of_measure where organization_id = $1 order by measurement_dimension, code`, [organizationId])).rows);

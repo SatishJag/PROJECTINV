@@ -4,6 +4,7 @@ import { procoreFromEnv } from "./procore.js";
 import { ensureOrganization, syncFromProcore } from "./sync.js";
 import { startCapturePoller } from "./capture.js";
 import { fileStoreFromEnv } from "./filestore.js";
+import { authFromEnv } from "./auth.js";
 
 const env = process.env;
 const log = (m: string) => console.log(`[projectinv] ${m}`);
@@ -23,7 +24,9 @@ if (procore.mode === "demo" || env.SYNC_ON_START === "true") {
 }
 const files = fileStoreFromEnv(env);
 log(`BOQ originals are stored in: ${files.kind}${files.kind === "local" ? " folder (development only)" : ""}`);
-const app = await buildApp({ db, files, procore, organizationId, appPassword: env.APP_PASSWORD || null, webhookSecret: env.PROCORE_WEBHOOK_SECRET || null });
+const auth = await authFromEnv(env, log);
+if (!auth) log(env.APP_PASSWORD ? "sign-in: shared APP_PASSWORD (no per-user database identity; set OIDC_ISSUER for Entra ID)" : "sign-in: none (development only)");
+const app = await buildApp({ db, files, procore, organizationId, auth, appPassword: env.APP_PASSWORD || null, webhookSecret: env.PROCORE_WEBHOOK_SECRET || null });
 // Catch-up scan of every project's watched Procore Documents folder (covers missed or unconfigured webhooks).
 const scanMinutes = Number(env.PROCORE_SCAN_MINUTES ?? (procore.mode === "live" ? 15 : 0));
 startCapturePoller({ db, files, procore, organizationId }, scanMinutes, log);

@@ -45,6 +45,9 @@ interfaces. **Supabase is no longer the target platform.** It, or plain local Po
 | OCR | Azure AI Document Intelligence | Amazon Textract |
 
 - Code must stay plain Postgres + interfaces: no Supabase SDK or Supabase-only features in app code.
+- With `OIDC_ISSUER` set, API requests run as the signed-in user (`asUser` / `userScoped` in `server/src/db.ts`).
+  Background work (Procore sync, capture, webhooks) must run with `asService`. Don't query `deps.db` directly in a
+  request handler to get around RLS.
 - **Never store file bytes in Postgres.** Originals go through `FileStore` (`server/src/filestore.ts`). The database
   keeps `storage_kind`, `storage_key` (`boq/<org>/<project>/<sha256>`), size and sha256.
 - On Azure, authenticate to Blob with managed identity (`AZURE_STORAGE_ACCOUNT_URL`). Connection strings are for

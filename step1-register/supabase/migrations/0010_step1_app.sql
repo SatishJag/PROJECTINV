@@ -123,9 +123,16 @@ create index audit_events_project on public.audit_events (project_id, created_at
 
 alter table public.audit_events enable row level security;
 create policy audit_select on public.audit_events
-    for select using (project_id in (select current_project_ids()));
+    for select using (
+        project_id in (select current_project_ids())
+        or organization_id in (select current_admin_org_ids(array['owner', 'admin']))
+    );
 create policy audit_insert on public.audit_events
-    for insert with check (project_id in (select current_project_ids()));
+    for insert with check (
+        project_id in (select current_project_ids())
+        or (project_id is null and organization_id in (select current_org_ids()))
+        or organization_id in (select current_admin_org_ids(array['owner', 'admin']))
+    );
 
 ------------------------------------------------------------------
 -- The register: project + work package + cost assignment + item, with

@@ -126,6 +126,16 @@ Migrations run on start; `npm run migrate` applies them alone. Sample BOQs: `npm
 
 Tests (in-process Postgres via PGlite): `npm test`. Type check: `npm run typecheck`.
 
+## Sign-in and per-user database access
+
+Set `OIDC_ISSUER` (Entra ID: `https://login.microsoftonline.com/<tenant-id>/v2.0`) and `OIDC_AUDIENCE` (the API's
+client id). Every API call then needs `Authorization: Bearer <access token>`; the server verifies it and runs the
+request in Postgres as role `authenticated` with the user's `oid`, so row-level security limits each person to the
+projects in their `project_memberships`. Users listed in `AUTH_OWNER_USER_IDS` become organization owners on first
+sign-in and add others with `PUT /api/members/:userId {role}` and `PUT /api/projects/:id/members/:userId {role}`.
+Procore sync, BOQ capture and webhooks run as the service. Without `OIDC_ISSUER`, the optional shared `APP_PASSWORD`
+protects the API (no per-user identity). The web app's Entra sign-in (MSAL) is not built yet.
+
 ## Configuration
 
 See `.env.example`. Live Procore needs `PROCORE_CLIENT_ID` / `PROCORE_CLIENT_SECRET` (the same DMSA app as AdvaPay,
