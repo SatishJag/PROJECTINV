@@ -9,6 +9,7 @@ import { Dashboard } from '@/pages/Dashboard'
 import { Requirements } from '@/pages/planning/Requirements'
 import { RequirementDetail } from '@/pages/planning/RequirementDetail'
 import { BoqImports } from '@/pages/planning/BoqImports'
+import { Step1Items } from '@/pages/planning/Step1Items'
 import { ImpactActions } from '@/pages/planning/ImpactActions'
 import { Benchmarks } from '@/pages/planning/Benchmarks'
 import { Packages } from '@/pages/sourcing/Packages'
@@ -116,6 +117,7 @@ export default function App() {
           <Route path="/planning/requirements" element={<Requirements />} />
           <Route path="/planning/requirements/:requirementId" element={<RequirementDetail />} />
           <Route path="/planning/boq" element={<BoqImports />} />
+          <Route path="/planning/step1-items" element={<Step1Items />} />
           <Route path="/planning/impact-actions" element={<ImpactActions />} />
           <Route path="/planning/benchmarks" element={<Benchmarks />} />
           <Route path="/sourcing" element={<Navigate replace to="/sourcing/packages" />} />

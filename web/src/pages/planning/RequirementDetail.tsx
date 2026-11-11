@@ -199,7 +199,12 @@ export function RequirementDetail() {
                   { label: 'State', value: <StateBadge state={data.state} /> },
                   { label: 'Approved revision', value: data.current_revision ? `Rev ${data.current_revision.revision_no}` : <Unknown label="Not approved" /> },
                 ]}
-                right={<Mono className="text-[11px] text-ink-muted">{data.id}</Mono>}
+                right={
+                  <>
+                    {data.source_boq_key === 'STEP1' ? <span className="text-[11px] text-ink-muted">Source: Step 1 · {data.source_line_key ?? 'Unknown line'}</span> : null}
+                    <Mono className="text-[11px] text-ink-muted">{data.id}</Mono>
+                  </>
+                }
               />
 
               {data.current_revision && data.latest_revision && data.current_revision.id !== data.latest_revision.id ? (

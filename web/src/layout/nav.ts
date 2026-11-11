@@ -28,6 +28,7 @@ export const WORKSPACES: Workspace[] = [
     items: [
       { to: '/planning/requirements', label: 'Requirements' },
       { to: '/planning/boq', label: 'BOQ imports' },
+      { to: '/planning/step1-items', label: 'Step 1 items' },
       { to: '/planning/impact-actions', label: 'Impact actions' },
       { to: '/planning/benchmarks', label: 'Benchmark evidence' },
     ],
