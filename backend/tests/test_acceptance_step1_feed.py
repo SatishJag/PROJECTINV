@@ -5,6 +5,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 
 from app.models import (
+    EquipmentClass,
     ExternalObjectLink,
     IntegrationException,
     Requirement,
@@ -197,3 +198,27 @@ def test_malformed_rows_raise_exceptions_for_that_record_only(s1):
     assert report["state"] == "PARTIAL"
     assert [r.source_line_key for r in s1.requirements()] == ["INV-00001"]
     assert s1.db.scalar(select(func.count()).select_from(Requirement).where(Requirement.source_boq_key == "STEP1")) == 1
+
+
+def test_requirement_code_collision_is_contained_to_that_record(s1):
+    tenant = s1.admin.tenant_id
+    chiller = s1.db.scalar(select(EquipmentClass).where(EquipmentClass.tenant_id == tenant, EquipmentClass.code == "CHL-AC"))
+    # _auto_code counts codes LIKE 'REQ-BKK1-GEN%' and appends count + 1, so a gap in the numbering makes it collide.
+    base = f"REQ-{s1.project.code}-{s1.gen.code}"
+    taken = s1.db.scalar(select(func.count()).select_from(Requirement).where(Requirement.tenant_id == tenant, Requirement.code.like(f"{base}%")))
+    s1.db.add(Requirement(tenant_id=tenant, code=f"{base}-{taken + 2}", title="Hand-made gap", project_id=s1.project.id, equipment_class_id=s1.gen.id))
+    s1.db.commit()
+    s1.rows(reg_row(), reg_row(record_number="INV-00002", item_id="item-chl", item_description="Air-cooled chiller 1500 kW"))
+    s1.classify()
+    s1.classify("item-chl", cls=chiller)
+
+    report = s1.sync()
+
+    assert report["counts"]["exceptions"] == 1
+    assert report["counts"]["created"] == 1
+    assert report["state"] == "PARTIAL"
+    assert [r.source_line_key for r in s1.requirements()] == ["INV-00002"]
+    assert all(s1.revisions(r) for r in s1.requirements())
+    [exc] = _open_exceptions(s1, "VALIDATION")
+    assert exc.subject_type == "step1_record"
+    assert "DUPLICATE_REQUIREMENT_CODE" in exc.message

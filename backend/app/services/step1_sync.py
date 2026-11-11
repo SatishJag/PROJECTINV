@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.auth import Principal
+from app.core.errors import DomainError
 from app.integrations.exceptions import open_exception
 from app.integrations.step1.client import Step1Client, Step1Unavailable
 from app.models import (
@@ -253,7 +254,18 @@ def _apply_record(run: _Run, project: Project, step1_project_id: str, reg: dict,
             "specification_json": {"boq": _boq_spec(reg)},
         },
     }
-    result, existed = planning.create_requirement(db, p, body)
+    # No savepoint needed: title, quantity (> 0) and class are validated above, so create_requirement can only fail
+    # before its first db.add (DUPLICATE_REQUIREMENT_CODE is raised before it). A caught error leaves no partial rows.
+    try:
+        result, existed = planning.create_requirement(db, p, body)
+    except DomainError as exc:
+        run.exception(
+            "VALIDATION",
+            "step1_record",
+            record_id,
+            f"Step 1 record {record_number} could not become a requirement: {exc.code}: {exc.detail}",
+        )
+        return
     requirement = db.get(Requirement, result["requirement"]["id"])
     if existed:
         other = db.scalar(
