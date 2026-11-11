@@ -10,7 +10,7 @@ write-back path. Unknown values stay unknown — never zero.
 
 - Backend: Python 3.14 · FastAPI · SQLAlchemy 2 · SQLite (WAL, foreign keys)
 - Frontend: React 19 · Vite 7 · TypeScript (strict) · Tailwind 4 · TanStack Query 5 · Radix UI
-- Tests: 35 pytest cases, covering acceptance criteria T01–T28
+- Tests: 85 pytest cases (35 for acceptance criteria T01–T28, the rest for the Step 1 feed)
 
 ---
 
@@ -83,12 +83,12 @@ Suppliers may only reach `/sourcing/*`; the UI redirects and the API enforces th
 | Workspace | What lives there |
 | --- | --- |
 | Dashboard | Cross-domain summary, attention queue, unit position, recent audit |
-| Planning & BOQ | Requirements + revisions, BOQ imports, impact actions, benchmark evidence |
+| Planning & BOQ | Requirements + revisions, BOQ imports, impact actions, benchmark evidence, **Step 1 items** (decide which register items are long-lead and of which equipment class) |
 | Sourcing & Award | Packages, immutable offer revisions, normalization, evaluation, frozen award, PO release |
 | Delivery & Assets | PO register and identities, serialized unit passports, stock, allocation, arrival, shipments, transfers, FAT & recovery |
 | Handbook & Operations | Handbook assembly, validation, waivers, approval, hashed publish, FM work orders |
 | Cost Intelligence | Cost events (actual/provisional/superseded), unit summaries, structure rollup, TCO scenarios |
-| Administration | Procore connection, outbox, webhook inbox, exceptions, external links, simulators, audit log |
+| Administration | Procore connection, **Step 1 feed** (sync now, last run, run history), outbox, webhook inbox, exceptions, external links, simulators, audit log |
 
 Commercial values (prices, totals, TCO) are only rendered for roles with commercial visibility; the API
 withholds them for supplier sessions.
@@ -174,6 +174,32 @@ PCX_FRAME_ANCESTORS='self' https://app.procore.com https://us02.procore.com http
   description to register in the Procore developer portal; the UI displays it on the Procore connection page.
 - **SIMULATED demo company** — the seed connects a simulated company (`562949953421312`), syncs resources
   and replays outbox write-backs so Administration shows a realistic connection on first launch.
+
+---
+
+## Step 1 feed
+
+PCX can pull the BOQ register from the separate Step 1 app (`step1-register/`) and turn long-lead items into
+requirements. Configure it in `backend/.env` (prefix `PCX_`):
+
+```ini
+PCX_STEP1_BASE_URL=http://127.0.0.1:4100   # where the Step 1 server listens
+PCX_STEP1_APP_PASSWORD=...                  # Step 1's APP_PASSWORD, sent as a bearer token; never stored or logged
+```
+
+With either unset the feed is off: *Administration → Step 1* shows "not configured" and `POST /api/integrations/step1/sync`
+returns `409 STEP1_NOT_CONFIGURED`.
+
+- **Planning & BOQ → Step 1 items** (`/planning/step1-items`): an estimator or engineer marks each register item as
+  long-lead (with an equipment class) or not. Classifying creates nothing by itself.
+- **Administration → Step 1** (`/admin/step1`): the INTEGRATION role presses *Sync now*. A sync creates or revises
+  **draft** requirements only, matches Step 1 projects to PCX projects on the Procore project id, and sets the WBS
+  element from the cost code when exactly one matches. The page shows the last run and the run history.
+- The older `POST /api/planning/boq-imports` still works, but it is legacy and does not set the WBS element.
+
+Design: [docs/superpowers/specs/2026-11-11-step1-feed-design.md](docs/superpowers/specs/2026-11-11-step1-feed-design.md) ·
+plan: [docs/superpowers/plans/2026-11-11-step1-feed.md](docs/superpowers/plans/2026-11-11-step1-feed.md) ·
+routes: [docs/api-contract.md](docs/api-contract.md#step-1-feed--apiintegrationsstep1).
 
 ---
 

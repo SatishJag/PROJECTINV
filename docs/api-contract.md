@@ -38,7 +38,7 @@ schema in `backend/app/models.py` is authoritative for field names.
 | POST `/requirements/{id}/revisions` | `{changes:{...revision fields}, change_reason}` | new DRAFT revision; `changed_fields` computed against its predecessor |
 | POST `/revisions/{id}/submit` · `/approve` · `/cancel` | approve requires If-Match on the revision's requirement | Approve promotes `current_revision_id`, supersedes the prior approved revision, opens ImpactActions for affected evaluations, awards, POs and reservations, and publishes `RequirementRevisionApproved` (T02) |
 | GET `/impact-actions?state=` · POST `/impact-actions/{id}/resolve` `{resolution}` | | |
-| POST `/boq-imports` | `{project_id, source_key, lines:[{source_line_key, title, equipment_class_code, quantity, uom, budget_amount, currency, duty?, capacity?, capacity_unit?, cost_code?, required_site_date?}]}` | BoqRevision. Same `source_hash` → same revision (idempotent); a different hash → next revision |
+| POST `/boq-imports` (**legacy**) | `{project_id, source_key, lines:[{source_line_key, title, equipment_class_code, quantity, uom, budget_amount, currency, duty?, capacity?, capacity_unit?, cost_code?, required_site_date?}]}` | BoqRevision. Same `source_hash` → same revision (idempotent); a different hash → next revision. **Legacy:** still works, and T01 and the seed use it, but it does not set `wbs_id` on the requirements it creates. New BOQ data should come through the [Step 1 feed](#step-1-feed--apiintegrationsstep1) |
 | GET `/boq-revisions?project_id=` | | |
 | GET `/benchmark-observations?equipment_class_id=` | | |
 | POST `/benchmark-runs` | `{requirement_revision_id, evidence_cutoff?}` | run with `results[]`, `excluded[]` (with reasons), `quality_json` (`sample_count`, `coverage`, `missing_scope`, `basis`). State is `INSUFFICIENT_EVIDENCE` when n < `benchmark_min_sample` (T03, T04) |
@@ -178,6 +178,67 @@ Commands on a package:
 - `GET /inbox`
 - `GET /exceptions?state=` · `POST /exceptions/{id}/resolve` `{resolution}`
 - `GET /simulators` · `POST /simulators/{ORACLE|PLANON|PROCORE}/mode` `{mode: ACK|REJECT|TIMEOUT|TRANSIENT}`
+
+## Step 1 feed — `/api/integrations/step1`
+
+PCX pulls the BOQ register from the separate Step 1 app on demand and turns long-lead records into requirements. Design: `docs/superpowers/specs/2026-11-11-step1-feed-design.md`.
+
+**Configuration:** `PCX_STEP1_BASE_URL` and `PCX_STEP1_APP_PASSWORD` (backend environment). The password is sent to Step 1 as a bearer token and is never stored, logged or returned by any route. When either is unset, `GET /status` reports `configured: false` and `POST /sync` returns 409 `STEP1_NOT_CONFIGURED`.
+
+**How it works:**
+- Step 1 items are shared across projects. An estimator or engineer decides once per item whether it is long-lead (`LLE`, with a PCX equipment class) or not (`NOT_LLE`). New items start as `PENDING`; the crosswalk may carry a `suggested_class_id`.
+- A sync fetches every Step 1 project and its register, then matches each Step 1 project to a PCX project on `procore_project_id` (and on `procore_company_id` too when both sides have one). Records of `LLE` items create a requirement with `source_boq_key = "STEP1"` and `source_line_key` = the Step 1 `record_number`, `step1_item_id` set, and a **DRAFT** revision 1. `wbs_id` is set when exactly one WBS element in the project has the record's cost code; otherwise it stays `null` and a `MAPPING` exception is raised.
+- A later change to the record creates a new DRAFT revision (an open DRAFT or IN_REVIEW revision is cancelled and replaced; fields entered in PCX are carried over). A sync **never approves** a revision, never edits an approved or superseded one, and never cancels a requirement.
+- Only `normalized_uom = "each"` is accepted (stored as `EA`). Quantities are exact decimal strings. A serialized class needs a whole-number quantity above zero.
+- A bad record raises an `IntegrationException` (source `STEP1`, owner role `ESTIMATOR`; kinds `VALIDATION`, `MAPPING`, `RECONCILIATION`) and the rest still sync. The whole run is one transaction; all HTTP fetching happens before the first write.
+
+| Method and path | Roles | Body / query | Returns |
+|---|---|---|---|
+| GET `/status` | any internal user | | `{configured, last_run: run\|null, pending_items, open_exceptions}`. `last_run` is the latest run of any state, not the last good one |
+| GET `/runs?limit=` | any internal user | `limit` 1–100, default 20 | run rows, newest first |
+| POST `/sync` | INTEGRATION, ADMIN | `{project_ids?: [pcx project id]}`; omit or `null` for every matching project. Accepts `Idempotency-Key` | sync report (below) |
+| GET `/items?decision=` | any internal user | `decision` is `PENDING`, `LLE` or `NOT_LLE`; omit for all (422 `VALIDATION` otherwise) | crosswalk rows, ordered by description |
+| POST `/items/{id}/classify` | ESTIMATOR, ENGINEERING, ADMIN | `{decision: "LLE"\|"NOT_LLE", equipment_class_id, reason?}`. Accepts `Idempotency-Key` and an optional `If-Match` | the updated crosswalk row |
+
+`{id}` in `/items/{id}/classify` is the crosswalk row's `id`, not `step1_item_id`. Supplier principals are blocked from every route (`require_internal`).
+
+**Crosswalk row** (`GET /items`, classify response): `{id, step1_item_id, internal_item_code, description, suggested_class_id, suggested_class_name, decision, equipment_class_id, decision_reason, decided_by, decided_at, last_seen_at, requirement_count, version, etag, created_at, updated_at}`. `requirement_count` counts live (not cancelled) requirements fed from the item.
+
+**Classify rules:**
+- `LLE` needs `equipment_class_id`, an existing, non-component class in the caller's tenant (422 `VALIDATION` otherwise, nothing changes). `reason` is optional.
+- `NOT_LLE` needs `reason`. Live requirements are not cancelled; each gets a `RECONCILIATION` exception asking an estimator to decide whether to cancel it.
+- Changing the class of an item that already has live requirements returns 409 `CLASS_IN_USE`. Cancel or move the requirements first.
+- Classifying never creates requirements. They are created or revised by the next sync.
+
+**Sync report** (`POST /sync` response, 200):
+
+```json
+{
+  "run_id": "…",
+  "state": "SUCCEEDED | PARTIAL | FAILED",
+  "counts": {"created": 0, "revised": 0, "unchanged": 0, "queued": 0, "ignored": 0, "exceptions": 0, "skipped_projects": 0},
+  "projects": [
+    {"step1_project_id": "…", "pcx_project_id": "…", "status": "synced"},
+    {"step1_project_id": "…", "pcx_project_id": null, "status": "skipped", "reason": "No PCX project has this Procore project"}
+  ],
+  "error": "only when state is FAILED"
+}
+```
+
+- `created` and `revised` count requirements created and new draft revisions. `unchanged` counts records already in line with PCX. `queued` counts records whose item is still `PENDING`; `ignored` counts records of `NOT_LLE` items. All counts are per record, not per item.
+- `exceptions` counts exceptions raised in this run, including dropped-record and cancelled-requirement `RECONCILIATION` notes. `state` is `PARTIAL` when any non-`RECONCILIATION` exception was raised, otherwise `SUCCEEDED`.
+- A Step 1 project with no matching PCX project, several matching PCX projects, or a match outside the caller's project scope is `skipped` with a `reason`.
+- A record that disappears from Step 1 raises a `RECONCILIATION` exception; the requirement stays `ACTIVE`. The exception resolves itself when the record returns.
+
+**Run row** (`GET /runs`, and `last_run` in `/status`): `{id, started_at, finished_at, actor, state, projects_json, counts_json, error}`. `projects_json` and `counts_json` have the shapes of `projects` and `counts` above. `error` is null unless the run is `FAILED`.
+
+**Errors and idempotency:**
+- `STEP1_NOT_CONFIGURED` (409): `POST /sync` with the base URL or password unset. Role is checked first, so a non-INTEGRATION user gets 403 `FORBIDDEN`.
+- `CLASS_IN_USE` (409): see the classify rules.
+- 404 `NOT_FOUND`: an unknown, cross-tenant or out-of-scope id in `project_ids` (checked before anything is fetched or written), or an unknown crosswalk row id.
+- **A FAILED run returns HTTP 200**, not an error status: Step 1 unreachable, timed out, 401, or a non-JSON response give `state: "FAILED"`, an `error` message and a stored FAILED run row. Nothing else was written. The error message never contains the password.
+- **A FAILED outcome is replayed under the same `Idempotency-Key`** like any other stored response. After an outage, retry with a **fresh** key, or the same failure comes back without contacting Step 1.
+- `GET /status` and `GET /runs` are scoped to the **tenant**, not to the caller's projects. `projects_json` can therefore list Step 1 projects the caller cannot see in PCX.
 
 ## Outbox event catalogue
 

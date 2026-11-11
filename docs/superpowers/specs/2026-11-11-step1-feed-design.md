@@ -89,8 +89,8 @@ Step 1 items are shared across projects, so one decision covers the item in ever
   `object_key` = Step 1 `inventory_record_id`, `domain_type = requirement`, `domain_id` = PCX requirement id,
   `source_revision` = the change hash (§6), `sync_state = LINKED`.
 - **`IntegrationException`** gets the new `source` value `STEP1`. Kinds used: `MAPPING`, `VALIDATION`, `RECONCILIATION`.
-  Owner role `ESTIMATOR`. Reuse the existing `open_exception` / `auto_resolve` helpers; the plan decides whether to
-  import them from `integrations/procore/links.py` or lift them into a shared module (preferred, they are generic).
+  Owner role `ESTIMATOR`. Reuse the existing `open_exception` / `auto_resolve` helpers. Decision: they are lifted into the shared module
+  `backend/app/integrations/exceptions.py` (source-parameterised); `integrations/procore/links.py` delegates to it.
 - **`Requirement`**: `source_boq_key = "STEP1"`, `source_line_key` = Step 1 `record_number` (e.g. `INV-00012`).
   The existing `(project, source_boq_key, source_line_key)` de-duplication in `create_requirement` then makes
   creation replay-safe.
