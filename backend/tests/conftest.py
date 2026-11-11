@@ -97,3 +97,11 @@ def login(client):
         return cache[email]
 
     return _login
+
+
+@pytest.fixture
+def s1(scenario_a):
+    """Scenario A plus a fake Step 1 whose project S1-P1 matches BKK1; register holds one default reg_row()."""
+    from tests.step1_support import make_s1_env
+
+    return make_s1_env(scenario_a)
