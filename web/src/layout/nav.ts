@@ -91,6 +91,7 @@ export const WORKSPACES: Workspace[] = [
     roles: ['ADMIN', 'INTEGRATION', 'OWNER'],
     items: [
       { to: '/admin/procore', label: 'Procore connection' },
+      { to: '/admin/step1', label: 'Step 1' },
       { to: '/admin/outbox', label: 'Outbox' },
       { to: '/admin/inbox', label: 'Webhook inbox' },
       { to: '/admin/exceptions', label: 'Exceptions' },

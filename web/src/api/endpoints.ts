@@ -247,3 +247,14 @@ export const integrations = {
   simulators: g<unknown>(`${X}/simulators`),
   setSimulatorMode: (target: string, mode: string) => post(`${X}/simulators/${target}/mode`, { mode }),
 }
+
+// ---------------------------------------------------------------- Step 1 feed
+const S1 = '/integrations/step1'
+export const step1 = {
+  status: g<T.Step1Status>(`${S1}/status`),
+  runs: (limit = 20) => g<T.Step1Run[]>(`${S1}/runs`, { limit }),
+  items: (decision?: T.Step1Decision) => g<T.Step1Item[]>(`${S1}/items`, { decision }),
+  classify: (id: string, body: { decision: 'LLE' | 'NOT_LLE'; equipment_class_id?: string | null; reason?: string | null }, opts: Cmd = {}) =>
+    post<T.Step1Item>(`${S1}/items/${id}/classify`, body, { idempotencyKey: true, ...opts }),
+  sync: (projectIds?: string[]) => post<T.Step1SyncReport>(`${S1}/sync`, projectIds?.length ? { project_ids: projectIds } : {}, { idempotencyKey: true }),
+}

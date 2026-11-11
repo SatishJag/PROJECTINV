@@ -32,6 +32,7 @@ import { UnitCosts } from '@/pages/costs/UnitCosts'
 import { Rollup } from '@/pages/costs/Rollup'
 import { TcoScenarios } from '@/pages/costs/TcoScenarios'
 import { ProcoreAdmin } from '@/pages/admin/ProcoreAdmin'
+import { Step1Admin } from '@/pages/admin/Step1Admin'
 import { Outbox } from '@/pages/admin/Outbox'
 import { Inbox } from '@/pages/admin/Inbox'
 import { Exceptions } from '@/pages/admin/Exceptions'
@@ -144,6 +145,7 @@ export default function App() {
           <Route path="/costs/tco" element={<TcoScenarios />} />
           <Route path="/admin" element={<Navigate replace to="/admin/procore" />} />
           <Route path="/admin/procore" element={<ProcoreAdmin />} />
+          <Route path="/admin/step1" element={<Step1Admin />} />
           <Route path="/admin/outbox" element={<Outbox />} />
           <Route path="/admin/inbox" element={<Inbox />} />
           <Route path="/admin/exceptions" element={<Exceptions />} />

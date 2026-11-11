@@ -1059,3 +1059,59 @@ export interface Health {
   status: string
   procore_mode?: string
 }
+
+// ---------------------------------------------------------------- Step 1 feed
+export type Step1RunState = 'SUCCEEDED' | 'PARTIAL' | 'FAILED'
+export type Step1Decision = 'PENDING' | 'LLE' | 'NOT_LLE'
+export interface Step1Counts {
+  created: number
+  revised: number
+  unchanged: number
+  queued: number
+  ignored: number
+  exceptions: number
+  skipped_projects: number
+}
+export interface Step1Run {
+  id: string
+  started_at: ISODateTime | null
+  finished_at: ISODateTime | null
+  actor: string
+  state: Step1RunState
+  projects_json: unknown[]
+  counts_json: Partial<Step1Counts>
+  error: string | null
+}
+export interface Step1Status {
+  configured: boolean
+  last_run: Step1Run | null
+  pending_items: number
+  open_exceptions: number
+}
+export interface Step1Item extends Base, Versioned {
+  step1_item_id: string
+  internal_item_code: string | null
+  description: string
+  suggested_class_id: string | null
+  suggested_class_name: string | null
+  decision: Step1Decision
+  equipment_class_id: string | null
+  decision_reason: string | null
+  decided_by?: string | null
+  decided_at?: ISODateTime | null
+  last_seen_at?: ISODateTime | null
+  requirement_count: number
+}
+export interface Step1SyncProject {
+  step1_project_id: string
+  pcx_project_id: string | null
+  status: string
+  reason?: string
+}
+export interface Step1SyncReport {
+  run_id: string
+  state: Step1RunState
+  counts: Step1Counts
+  projects: Step1SyncProject[]
+  error?: string | null
+}

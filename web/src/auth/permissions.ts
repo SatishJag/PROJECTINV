@@ -45,6 +45,8 @@ export const CAPABILITIES = {
   'tco.create': ['FINANCE', 'ESTIMATOR', 'OWNER', 'PROCUREMENT'],
   'fm.import': ['FM', 'FINANCE'],
   'integration.manage': ['INTEGRATION'],
+  'step1.sync': ['INTEGRATION'],
+  'step1.classify': ['ESTIMATOR', 'ENGINEERING'],
 } satisfies Record<string, Role[]>
 
 export type Capability = keyof typeof CAPABILITIES
