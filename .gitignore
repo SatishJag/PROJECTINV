@@ -34,3 +34,6 @@ Inventory Procore.docx
 Thumbs.db
 .idea/
 .vscode/
+
+# Generated code graph (rebuild with: graphify update .)
+graphify-out/
