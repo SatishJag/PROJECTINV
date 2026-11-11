@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import Principal
 from app.core.errors import DomainError
-from app.integrations.exceptions import open_exception
+from app.integrations.exceptions import auto_resolve, open_exception
 from app.integrations.step1.client import Step1Client, Step1Unavailable
 from app.models import (
     EquipmentClass,
@@ -28,7 +28,7 @@ from app.models import (
     utcnow,
 )
 from app.services import planning
-from app.services.helpers import audit
+from app.services.helpers import approved_revision, audit, latest_requirement_revision
 from app.services.step1_items import see_item
 
 SOURCE = "STEP1"
@@ -38,6 +38,10 @@ EXC_SUBJECT = "step1_record"  # subject_type of every record-level exception (su
 OWNER_ROLE = "ESTIMATOR"
 TITLE_MAX = 300
 COUNT_KEYS = ("created", "revised", "unchanged", "queued", "ignored", "exceptions", "skipped_projects")
+STEP1_REVISION_FIELDS = ("quantity", "uom", "cost_code", "specification_json")  # the revision fields Step 1 owns
+REPLACED_REASON = "Replaced by Step 1 sync"
+RESOLVED_IN_STEP1 = "Resolved in Step 1"
+OPEN_REVISION_STATES = ("DRAFT", "IN_REVIEW")
 
 
 # ---------------------------------------------------------------- pure helpers
@@ -172,6 +176,11 @@ class _Run:
         self.db = db
         self.p = p
         self.counts = dict.fromkeys(COUNT_KEYS, 0)
+        self.reconciliation = 0  # RECONCILIATION notes: counted in "exceptions" but they do not make the run PARTIAL
+
+    @property
+    def state(self) -> str:
+        return "PARTIAL" if self.counts["exceptions"] > self.reconciliation else "SUCCEEDED"
 
     def exception(self, kind: str, subject_type: str, subject_id: str, message: str) -> None:
         open_exception(
@@ -186,6 +195,119 @@ class _Run:
             actor=self.p.email,
         )
         self.counts["exceptions"] += 1
+        if kind == "RECONCILIATION":
+            self.reconciliation += 1
+
+    def resolve(self, kind: str, subject_type: str, subject_id: str, resolution: str = RESOLVED_IN_STEP1) -> None:
+        auto_resolve(self.db, self.p.tenant_id, source=SOURCE, kind=kind, subject_type=subject_type, subject_id=subject_id, resolution=resolution)
+
+    def record_clean(self, record_id: str, requirement: Requirement) -> None:
+        """The record synced without a new exception: close what Step 1 has since fixed (R6).
+
+        MAPPING is closed only once the requirement actually has a WBS element; the sync never re-matches WBS for an
+        existing requirement, so an unchanged record whose WBS is still missing keeps its MAPPING exception open.
+        """
+        self.resolve("VALIDATION", EXC_SUBJECT, record_id)
+        if requirement.wbs_id:
+            self.resolve("MAPPING", EXC_SUBJECT, record_id)
+
+
+# ---------------------------------------------------------------- changes to linked records
+
+
+def _quantity_text(value: Decimal | None) -> str:
+    return _canonical_quantity(value) if value is not None else "unknown"
+
+
+def _apply_change(db: Session, p: Principal, requirement: Requirement, link: ExternalObjectLink, reg: dict) -> str:
+    """Bring a linked requirement in line with a changed Step 1 record as a new DRAFT revision (spec §6.3).
+
+    Approved and superseded revisions are never touched. An open DRAFT/IN_REVIEW revision is replaced: it is cancelled
+    with "Replaced by Step 1 sync" and its PCX-entered fields are carried into the new draft, with the Step 1 fields on
+    top. ``add_revision`` copies from the approved revision and computes ``changed_fields`` against it.
+    """
+    latest = latest_requirement_revision(db, requirement.id)
+    carry: dict[str, Any] = {}
+    if latest is not None and latest.state in OPEN_REVISION_STATES:
+        carry = {field: getattr(latest, field) for field in planning.REVISION_FIELDS}
+        planning.cancel_revision(db, p, latest.id)
+        latest.change_reason = REPLACED_REASON
+    base = approved_revision(db, requirement) or latest
+    old_quantity = latest.quantity if latest is not None else None
+    new_quantity = _parse_quantity(reg["boq_quantity"])
+    base_spec = (carry.get("specification_json") if carry else (base.specification_json if base is not None else None)) or {}
+    changes = {
+        **carry,
+        "quantity": new_quantity,
+        "uom": "EA",
+        "cost_code": reg.get("cost_code"),
+        "specification_json": {**base_spec, "boq": _boq_spec(reg)},
+    }
+    record_number = str(reg["record_number"])
+    if old_quantity is not None and old_quantity == new_quantity:
+        reason = f"Step 1 BOQ change: {record_number} details changed (quantity {_quantity_text(new_quantity)} unchanged)"
+    else:
+        reason = f"Step 1 BOQ change: {record_number} quantity {_quantity_text(old_quantity)} → {_quantity_text(new_quantity)}"
+    planning.add_revision(db, p, requirement.id, {"changes": changes, "change_reason": reason})
+    link.source_revision = change_hash(reg)
+    link.last_synced_at = utcnow()
+    db.flush()
+    return "revised"
+
+
+def _reconcile_dropped(db: Session, p: Principal, step1_project_id: str, seen_record_ids: set[str]) -> int:
+    """RECONCILIATION exception for each linked record no longer in this Step 1 project's register; returns how many.
+
+    A record counts as present only when the run processed it (``source_line_count > 0``). Present records get any
+    earlier "dropped" exception resolved. The requirement is never cancelled. A cancelled requirement needs no note.
+    """
+    dropped = 0
+    links = db.scalars(
+        select(ExternalObjectLink).where(
+            ExternalObjectLink.tenant_id == p.tenant_id,
+            ExternalObjectLink.platform == SOURCE,
+            ExternalObjectLink.company_key == "",
+            ExternalObjectLink.project_key == step1_project_id,
+            ExternalObjectLink.object_type == OBJECT_TYPE,
+            ExternalObjectLink.link_role == "PRIMARY",
+        )
+    )
+    for link in links:
+        requirement = db.get(Requirement, link.domain_id) if link.domain_type == "requirement" else None
+        present = link.object_key in seen_record_ids
+        if present or requirement is None or requirement.tenant_id != p.tenant_id or requirement.state != "ACTIVE":
+            auto_resolve(
+                db,
+                p.tenant_id,
+                source=SOURCE,
+                kind="RECONCILIATION",
+                subject_type=EXC_SUBJECT,
+                subject_id=link.object_key,
+                resolution=RESOLVED_IN_STEP1 if present else "Requirement is no longer active",
+            )
+            continue
+        open_exception(
+            db,
+            p.tenant_id,
+            source=SOURCE,
+            kind="RECONCILIATION",
+            subject_type=EXC_SUBJECT,
+            subject_id=link.object_key,
+            message=f"Source BOQ no longer contains {requirement.source_line_key}; requirement {requirement.code} is unchanged. Review whether it is still needed.",
+            owner_role=OWNER_ROLE,
+            actor=p.email,
+        )
+        dropped += 1
+    return dropped
+
+
+def _cancelled_note(run: _Run, requirement: Requirement, record_number: str) -> None:
+    run.exception(
+        "RECONCILIATION",
+        "requirement",
+        requirement.id,
+        f"Requirement {requirement.code} is cancelled, but Step 1 still lists {record_number}; Step 1 changes are not applied to it.",
+    )
 
 
 def _apply_record(run: _Run, project: Project, step1_project_id: str, reg: dict, index: int) -> None:
@@ -235,9 +357,26 @@ def _apply_record(run: _Run, project: Project, step1_project_id: str, reg: dict,
     digest = change_hash(reg)
     link = _link_for(db, p.tenant_id, record_id)
     if link is not None:
+        requirement = db.get(Requirement, link.domain_id) if link.domain_type == "requirement" else None
+        if requirement is None or requirement.tenant_id != p.tenant_id:
+            run.exception("VALIDATION", EXC_SUBJECT, record_id, f"Step 1 record {record_number} is linked to a requirement that no longer exists")
+            return
+        if requirement.project_id != project.id:
+            run.exception(
+                "VALIDATION",
+                EXC_SUBJECT,
+                record_id,
+                f"Step 1 record {record_number} is linked to requirement {requirement.code} in another PCX project; Step 1 changes are not applied",
+            )
+            return
+        if requirement.state != "ACTIVE":
+            _cancelled_note(run, requirement, record_number)
+            return
         if link.source_revision == digest:
             run.counts["unchanged"] += 1
-        # A changed hash is handled by the change rules (revise / replace), not by creation.
+        else:
+            run.counts[_apply_change(db, p, requirement, link, reg)] += 1
+        run.record_clean(record_id, requirement)
         return
 
     wbs, wbs_problem = _wbs_for(db, p.tenant_id, project.id, reg.get("cost_code"))
@@ -303,9 +442,15 @@ def _apply_record(run: _Run, project: Project, step1_project_id: str, reg: dict,
         )
     )
     db.flush()
+    if existed and requirement.state != "ACTIVE":
+        _cancelled_note(run, requirement, record_number)
+        return
     run.counts["unchanged" if existed else "created"] += 1
     if wbs_problem and not existed:
         run.exception("MAPPING", EXC_SUBJECT, record_id, f"Requirement {requirement.code} (Step 1 {record_number}): {wbs_problem}")
+        run.resolve("VALIDATION", EXC_SUBJECT, record_id)
+    else:
+        run.record_clean(record_id, requirement)
 
 
 def _finish(db: Session, p: Principal, started_at, state: str, projects: list[dict], counts: dict, error: str | None = None) -> Step1SyncRun:
@@ -367,14 +512,20 @@ def sync(db: Session, p: Principal, client: Step1Client, project_ids: list[str] 
             tally.counts["skipped_projects"] += 1
             projects.append({"step1_project_id": step1_project_id, "pcx_project_id": None, "status": "skipped", "reason": reason})
             continue
+        seen_record_ids: set[str] = set()
         for index, reg in enumerate(rows):
             # Dropped records (source_line_count 0) are treated as absent by the change rules, never validated here.
             if isinstance(reg, dict) and _source_line_count(reg) == 0:
                 continue
+            if isinstance(reg, dict) and reg.get("inventory_record_id"):
+                seen_record_ids.add(str(reg["inventory_record_id"]))
             _apply_record(tally, project, step1_project_id, reg, index)
+        dropped = _reconcile_dropped(db, p, step1_project_id, seen_record_ids)
+        tally.counts["exceptions"] += dropped
+        tally.reconciliation += dropped
         projects.append({"step1_project_id": step1_project_id, "pcx_project_id": project.id, "status": "synced"})
 
-    state = "PARTIAL" if tally.counts["exceptions"] else "SUCCEEDED"
+    state = tally.state
     run = _finish(db, p, started_at, state, projects, tally.counts)
     audit(db, p, "STEP1_SYNC_RUN", "step1_sync_run", run.id, after={"state": state, "counts": tally.counts})
     return _report(run)

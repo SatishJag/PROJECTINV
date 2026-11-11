@@ -9,6 +9,7 @@ from app.models import (
     ExternalObjectLink,
     IntegrationException,
     Requirement,
+    RequirementRevision,
     Step1ItemClass,
     Step1SyncRun,
     WbsElement,
@@ -231,3 +232,193 @@ def test_requirement_code_collision_is_contained_to_that_record(s1):
     [exc] = _open_exceptions(s1, "VALIDATION")
     assert exc.subject_type == "step1_record"
     assert "DUPLICATE_REQUIREMENT_CODE" in exc.message
+
+
+# ---------------------------------------------------------------- Task 5: changes, replacement, dropped, cancelled
+
+
+def _approve(s1, req):
+    """Mark revision 1 APPROVED and make it the requirement's current revision (test setup only)."""
+    [rev1] = s1.revisions(req)
+    rev1.state = "APPROVED"
+    req.current_revision_id = rev1.id
+    s1.db.commit()
+    return rev1
+
+
+def _set(s1, rev, **fields):
+    """Edit PCX-entered fields on a revision (test setup only)."""
+    for name, value in fields.items():
+        setattr(rev, name, value)
+    s1.db.commit()
+
+
+def _link_of(s1, reg):
+    return s1.db.scalar(
+        select(ExternalObjectLink).where(
+            ExternalObjectLink.platform == "STEP1",
+            ExternalObjectLink.object_type == "inventory_record",
+            ExternalObjectLink.object_key == reg["inventory_record_id"],
+        )
+    )
+
+
+def _open_draft_in_review(s1, req, **changes):
+    from app.services import planning
+
+    out = planning.add_revision(s1.db, s1.admin, req.id, {"changes": changes})
+    rev = s1.db.get(RequirementRevision, out["revision"]["id"])
+    rev.state = "IN_REVIEW"
+    s1.db.commit()
+    return rev
+
+
+def _synced_requirement(s1, **overrides):
+    reg = reg_row(**overrides)
+    s1.rows(reg)
+    s1.classify()
+    assert s1.sync()["counts"]["created"] == 1
+    [req] = s1.requirements()
+    return req, reg
+
+
+def test_quantity_change_creates_a_new_draft_carrying_pcx_fields(s1):
+    req, reg = _synced_requirement(s1)
+    rev1 = _approve(s1, req)
+    _set(s1, rev1, duty="STANDBY")
+    changed = {**reg, "boq_quantity": "7.000000"}
+    s1.rows(changed)
+
+    report = s1.sync()
+
+    assert report["counts"]["revised"] == 1
+    assert report["counts"]["created"] == 0
+    _, rev2 = s1.revisions(req)
+    assert rev2.state == "DRAFT"
+    assert rev2.predecessor_id == rev1.id
+    assert rev2.quantity == Decimal("7")
+    assert rev2.duty == "STANDBY"
+    assert rev2.changed_fields == ["quantity"]
+    assert "INV-00001" in rev2.change_reason
+    assert "6" in rev2.change_reason and "7" in rev2.change_reason
+    assert _link_of(s1, reg).source_revision == change_hash(changed)
+    assert s1.sync()["counts"]["unchanged"] == 1
+    assert len(s1.revisions(req)) == 2
+
+
+def test_change_during_review_replaces_the_open_revision(s1):
+    req, reg = _synced_requirement(s1)
+    rev1 = _approve(s1, req)
+    rev2 = _open_draft_in_review(s1, req, capacity="2500")
+    s1.rows({**reg, "boq_quantity": "8"})
+
+    report = s1.sync()
+
+    assert report["counts"]["revised"] == 1
+    revs = s1.revisions(req)
+    assert [r.revision_no for r in revs] == [1, 2, 3]
+    assert revs[1].id == rev2.id
+    assert rev2.state == "CANCELLED"
+    assert rev2.change_reason == "Replaced by Step 1 sync"
+    rev3 = revs[2]
+    assert rev3.state == "DRAFT"
+    assert rev3.predecessor_id == rev1.id
+    assert rev3.quantity == Decimal("8")
+    assert rev3.capacity == Decimal("2500")
+    assert set(rev3.changed_fields) == {"quantity", "capacity"}
+    assert len([r for r in revs if r.state in ("DRAFT", "IN_REVIEW")]) == 1
+
+
+def test_approved_baseline_is_never_touched(s1):
+    req, reg = _synced_requirement(s1)
+    rev1 = _approve(s1, req)
+    s1.rows({**reg, "boq_quantity": "7"})
+    s1.sync()
+    rev2 = s1.revisions(req)[1]
+    rev2.state = "IN_REVIEW"
+    s1.db.commit()
+    s1.rows({**reg, "boq_quantity": "8"})
+    s1.sync()
+
+    s1.db.refresh(rev1)
+    s1.db.refresh(req)
+    assert rev1.state == "APPROVED"
+    assert rev1.quantity == Decimal("6")
+    assert req.current_revision_id == rev1.id
+    assert [r.state for r in s1.revisions(req)] == ["APPROVED", "CANCELLED", "DRAFT"]
+
+
+def test_dropped_record_raises_exception_and_keeps_requirement_active(s1):
+    req, reg = _synced_requirement(s1)
+
+    for dropped in ([], [{**reg, "source_line_count": 0}]):
+        s1.rows(*dropped)
+        report = s1.sync()
+        assert report["counts"]["exceptions"] == 1
+        [exc] = _open_exceptions(s1, "RECONCILIATION")
+        assert exc.subject_type == "step1_record"
+        assert exc.subject_id == reg["inventory_record_id"]
+        assert "INV-00001" in exc.message
+        s1.db.refresh(req)
+        assert req.state == "ACTIVE"
+        assert len(s1.revisions(req)) == 1
+
+    s1.rows(reg)
+    report = s1.sync()
+    assert report["counts"]["unchanged"] == 1
+    assert report["counts"]["exceptions"] == 0
+    assert _open_exceptions(s1, "RECONCILIATION") == []
+    s1.db.refresh(exc)
+    assert exc.state == "RESOLVED"
+
+
+def test_empty_register_reports_every_linked_record_dropped(s1):
+    s1.rows(reg_row(), reg_row(record_number="INV-00002"))
+    s1.classify()
+    assert s1.sync()["counts"]["created"] == 2
+    s1.rows()
+
+    report = s1.sync()
+
+    assert report["counts"]["exceptions"] == 2
+    assert report["state"] == "SUCCEEDED"
+    reqs = s1.requirements()
+    assert len(reqs) == 2
+    assert all(r.state == "ACTIVE" for r in reqs)
+    assert len(_open_exceptions(s1, "RECONCILIATION")) == 2
+
+
+def test_cancelled_requirement_is_skipped_with_a_note(s1):
+    req, reg = _synced_requirement(s1)
+    req.state = "CANCELLED"
+    s1.db.commit()
+    s1.rows({**reg, "boq_quantity": "9"})
+
+    report = s1.sync()
+
+    assert report["counts"]["revised"] == 0
+    assert len(s1.revisions(req)) == 1
+    [exc] = _open_exceptions(s1, "RECONCILIATION")
+    assert exc.subject_type == "requirement"
+    assert exc.subject_id == req.id
+    s1.db.refresh(req)
+    assert req.state == "CANCELLED"
+
+
+def test_record_fixed_in_step1_resolves_its_validation_exception(s1):
+    reg = reg_row(normalized_uom="lot")
+    s1.rows(reg)
+    s1.classify()
+    s1.sync()
+    [exc] = _open_exceptions(s1, "VALIDATION")
+    assert exc.subject_id == reg["inventory_record_id"]
+    s1.rows({**reg, "normalized_uom": "each"})
+
+    report = s1.sync()
+
+    assert report["counts"]["created"] == 1
+    assert report["state"] == "SUCCEEDED"
+    assert _open_exceptions(s1, "VALIDATION") == []
+    s1.db.refresh(exc)
+    assert exc.state == "RESOLVED"
+    assert exc.resolution == "Resolved in Step 1"
