@@ -143,3 +143,22 @@ def test_see_item_upserts_and_refreshes(db):
     assert first.id == second.id
     assert second.description == "Renamed genset" and second.internal_item_code == "ITM-9"
     assert second.suggested_class_id == first.suggested_class_id
+
+
+def test_non_text_class_id_or_reason_is_422_not_500(client, login, scenario_a):
+    gen = support.equipment_class(scenario_a, "GEN")
+    item = _seed_item(scenario_a)
+    h = login("estimator@demo.pcx")
+    for body in (
+        {"decision": "LLE", "equipment_class_id": [gen.id]},
+        {"decision": "LLE", "equipment_class_id": {"id": gen.id}},
+        {"decision": "LLE", "equipment_class_id": 7},
+        {"decision": "LLE", "equipment_class_id": gen.id, "reason": 5},
+        {"decision": "NOT_LLE", "reason": {"why": "cabling"}},
+        {"decision": "NOT_LLE", "reason": ["cabling"]},
+    ):
+        r = _classify(client, h, item.id, body)
+        assert r.status_code == 422, (body, r.status_code, r.text)
+        assert r.json()["title"] == "VALIDATION"
+    r = client.get(f"{BASE}?decision=PENDING", headers=h)
+    assert [i["decision"] for i in r.json() if i["id"] == item.id] == ["PENDING"]

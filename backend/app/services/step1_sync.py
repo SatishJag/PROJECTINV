@@ -43,6 +43,7 @@ COUNT_KEYS = ("created", "revised", "unchanged", "queued", "ignored", "exception
 STEP1_REVISION_FIELDS = ("quantity", "uom", "cost_code", "specification_json")  # the revision fields Step 1 owns
 REPLACED_REASON = "Replaced by Step 1 sync"
 RESOLVED_IN_STEP1 = "Resolved in Step 1"
+NO_LONGER_APPLICABLE = "No longer applicable"
 OPEN_REVISION_STATES = ("DRAFT", "IN_REVIEW")
 ID_FIELDS = ("item_id", "inventory_record_id", "record_number")  # text or integer; converted to text once
 TEXT_FIELDS = (
@@ -296,7 +297,8 @@ def _reconcile_dropped(db: Session, p: Principal, step1_project_id: str, seen_re
     """RECONCILIATION exception for each linked record no longer in this Step 1 project's register; returns how many.
 
     A record counts as present only when the run processed it (``source_line_count > 0``). Present records get any
-    earlier "dropped" exception resolved. The requirement is never cancelled. A cancelled requirement needs no note.
+    earlier "dropped" exception resolved; dropped records get any open VALIDATION exception resolved as no longer
+    applicable. The requirement is never cancelled. A cancelled requirement needs no note.
     """
     dropped = 0
     links = db.scalars(
@@ -312,6 +314,9 @@ def _reconcile_dropped(db: Session, p: Principal, step1_project_id: str, seen_re
     for link in links:
         requirement = db.get(Requirement, link.domain_id) if link.domain_type == "requirement" else None
         present = link.object_key in seen_record_ids
+        if not present:
+            # A dropped record cannot be fixed any more, so a validation problem with it is moot.
+            auto_resolve(db, p.tenant_id, source=SOURCE, kind="VALIDATION", subject_type=EXC_SUBJECT, subject_id=link.object_key, resolution=NO_LONGER_APPLICABLE)
         if present or requirement is None or requirement.tenant_id != p.tenant_id or requirement.state != "ACTIVE":
             auto_resolve(
                 db,
@@ -365,6 +370,7 @@ def _apply_record(run: _Run, project: Project, step1_project_id: str, reg: dict,
         return
     if item.decision == "NOT_LLE":
         run.counts["ignored"] += 1
+        run.resolve("VALIDATION", EXC_SUBJECT, record_id, NO_LONGER_APPLICABLE)
         return
 
     cls = db.get(EquipmentClass, item.equipment_class_id) if item.equipment_class_id else None

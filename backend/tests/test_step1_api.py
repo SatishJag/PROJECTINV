@@ -160,3 +160,27 @@ def test_domain_errors_from_the_sync_still_propagate(client, login, s1, fake, mo
     assert r.json()["title"] == "NOT_FOUND"
     s1.db.expire_all()
     assert _runs(s1.db) == 0
+
+
+def test_project_outside_the_callers_scope_is_404_or_skipped(client, login, s1, fake):
+    from app.models import User
+
+    other = s1.db.scalar(select(Project).where(Project.tenant_id == s1.project.tenant_id, Project.id != s1.project.id))
+    assert other is not None
+    user = s1.db.scalar(select(User).where(User.email == "integration@demo.pcx", User.tenant_id == s1.project.tenant_id))
+    user.project_scope = other.id
+    s1.db.commit()
+    h = login("integration@demo.pcx")
+
+    explicit = client.post(f"{BASE}/sync", json={"project_ids": [s1.project.id]}, headers=h)
+    assert explicit.status_code == 404, explicit.text
+    assert explicit.json()["title"] == "NOT_FOUND"
+
+    r = client.post(f"{BASE}/sync", json={}, headers=h)
+    assert r.status_code == 200, r.text
+    [entry] = r.json()["projects"]
+    assert entry["step1_project_id"] == "S1-P1"
+    assert entry["status"] == "skipped"
+    assert entry["pcx_project_id"] is None
+    assert "scope" in entry["reason"]
+    assert r.json()["counts"]["skipped_projects"] == 1

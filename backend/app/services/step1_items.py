@@ -117,11 +117,15 @@ def classify_item(db: Session, p: Principal, item_id: str, body: dict, if_match:
     decision = body.get("decision")
     if decision not in ("LLE", "NOT_LLE"):
         raise DomainError("VALIDATION", "decision must be LLE or NOT_LLE")
+    if not isinstance(body.get("reason"), (str, type(None))):
+        raise DomainError("VALIDATION", "reason must be text")
     requirements = _requirements_of(db, p.tenant_id, item.step1_item_id)
     before = {"decision": item.decision, "equipment_class_id": item.equipment_class_id}
 
     if decision == "LLE":
         class_id = need(body, "equipment_class_id")
+        if not isinstance(class_id, str):
+            raise DomainError("VALIDATION", "equipment_class_id must be an equipment class id")
         cls = db.get(EquipmentClass, class_id)
         if cls is None or cls.tenant_id != p.tenant_id or cls.is_component_class:
             raise DomainError("VALIDATION", "equipment_class_id must be an existing, non-component equipment class")

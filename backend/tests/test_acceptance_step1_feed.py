@@ -474,3 +474,65 @@ def test_record_fixed_in_step1_resolves_its_validation_exception(s1):
     s1.db.refresh(exc)
     assert exc.state == "RESOLVED"
     assert exc.resolution == "Resolved in Step 1"
+
+
+def test_change_before_approval_replaces_the_unapproved_draft(s1):
+    req, reg = _synced_requirement(s1)
+    [rev1] = s1.revisions(req)
+    assert rev1.state == "DRAFT"
+    _set(s1, rev1, duty="STANDBY")
+    s1.rows({**reg, "boq_quantity": "7"})
+
+    report = s1.sync()
+
+    assert report["counts"]["revised"] == 1
+    s1.db.refresh(rev1)
+    s1.db.refresh(req)
+    assert rev1.state == "CANCELLED"
+    assert rev1.change_reason == "Replaced by Step 1 sync"
+    _, rev2 = s1.revisions(req)
+    assert rev2.revision_no == 2
+    assert rev2.state == "DRAFT"
+    assert rev2.predecessor_id == rev1.id
+    assert rev2.quantity == Decimal("7")
+    assert rev2.duty == "STANDBY"
+    assert rev2.changed_fields == ["quantity"]
+    assert req.current_revision_id is None
+
+
+def test_stale_validation_exception_closes_when_item_becomes_not_lle(s1):
+    reg = reg_row(normalized_uom="lot")
+    s1.rows(reg)
+    s1.classify()
+    s1.sync()
+    [exc] = _open_exceptions(s1, "VALIDATION")
+    assert exc.subject_id == reg["inventory_record_id"]
+    s1.classify(decision="NOT_LLE", reason="Not long-lead after all")
+
+    report = s1.sync()
+
+    assert report["counts"]["ignored"] == 1
+    assert report["state"] == "SUCCEEDED"
+    assert _open_exceptions(s1, "VALIDATION") == []
+    s1.db.refresh(exc)
+    assert exc.state == "RESOLVED"
+    assert exc.resolution == "No longer applicable"
+
+
+def test_stale_validation_exception_closes_when_linked_record_is_dropped(s1):
+    req, reg = _synced_requirement(s1)
+    s1.rows({**reg, "normalized_uom": "lot"})
+    s1.sync()
+    [exc] = _open_exceptions(s1, "VALIDATION")
+    assert exc.subject_id == reg["inventory_record_id"]
+    s1.rows()
+
+    report = s1.sync()
+
+    assert report["state"] == "SUCCEEDED"
+    assert _open_exceptions(s1, "VALIDATION") == []
+    s1.db.refresh(exc)
+    assert exc.state == "RESOLVED"
+    assert exc.resolution == "No longer applicable"
+    [note] = _open_exceptions(s1, "RECONCILIATION")
+    assert note.subject_id == reg["inventory_record_id"]
