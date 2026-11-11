@@ -210,6 +210,58 @@ def test_malformed_rows_raise_exceptions_for_that_record_only(s1):
     assert {e.subject_id for e in excs} == {r["inventory_record_id"] for r in bad}
 
 
+def test_badly_typed_or_out_of_range_rows_cost_one_exception_each(s1):
+    bad = [
+        reg_row(record_number="INV-00002", item_description=12345),
+        reg_row(record_number="INV-00003", normalized_uom=1),
+        reg_row(record_number="INV-00004", item_id=["item-gen"]),
+        reg_row(record_number="INV-00005", item_id={"id": "item-gen"}),
+        reg_row(record_number="INV-00006", cost_code={"code": "26-100"}),
+        reg_row(record_number="INV-00007", boq_quantity="1e400"),
+        reg_row(record_number="INV-00008", boq_quantity="1000000000000000"),
+        reg_row(record_number="INV-00009", boq_quantity="0.0000004"),
+        reg_row(record_number="INV-00010", specification=["2500 kVA"]),
+        reg_row(record_number="INV-00011", work_package_name=7),
+        reg_row(record_number="INV-00012", item_id=True),
+    ]
+    s1.rows(reg_row(), *bad)
+    s1.classify()
+
+    report = s1.sync()
+
+    assert report["counts"]["created"] == 1
+    assert report["counts"]["exceptions"] == len(bad)
+    assert report["state"] == "PARTIAL"
+    assert [r.source_line_key for r in s1.requirements()] == ["INV-00001"]
+    assert all(s1.revisions(r) for r in s1.requirements())
+    no_revision = s1.db.scalar(
+        select(func.count())
+        .select_from(Requirement)
+        .where(~select(RequirementRevision.id).where(RequirementRevision.requirement_id == Requirement.id).exists())
+    )
+    assert no_revision == 0
+    excs = _open_exceptions(s1, "VALIDATION")
+    assert {e.subject_type for e in excs} == {"step1_record"}
+    assert {e.subject_id for e in excs} == {r["inventory_record_id"] for r in bad}
+    messages = " | ".join(e.message for e in excs)
+    assert "item_description is not text" in messages
+    assert "cost_code is not text" in messages
+
+
+def test_integer_ids_are_accepted_as_text(s1):
+    s1.rows(reg_row(item_id=42, inventory_record_id=777, record_number=1001))
+    assert s1.sync()["counts"]["queued"] == 1  # the crosswalk row is keyed by the text id "42"
+    s1.classify("42")
+
+    report = s1.sync()
+
+    assert report["state"] == "SUCCEEDED", report
+    [req] = s1.requirements()
+    assert req.source_line_key == "1001"
+    assert req.step1_item_id == "42"
+    assert _link_of(s1, {"inventory_record_id": "777"}) is not None
+
+
 def test_requirement_code_collision_is_contained_to_that_record(s1):
     tenant = s1.admin.tenant_id
     chiller = s1.db.scalar(select(EquipmentClass).where(EquipmentClass.tenant_id == tenant, EquipmentClass.code == "CHL-AC"))

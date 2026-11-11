@@ -44,6 +44,20 @@ STEP1_REVISION_FIELDS = ("quantity", "uom", "cost_code", "specification_json")  
 REPLACED_REASON = "Replaced by Step 1 sync"
 RESOLVED_IN_STEP1 = "Resolved in Step 1"
 OPEN_REVISION_STATES = ("DRAFT", "IN_REVIEW")
+ID_FIELDS = ("item_id", "inventory_record_id", "record_number")  # text or integer; converted to text once
+TEXT_FIELDS = (
+    "item_description",
+    "specification",
+    "normalized_uom",
+    "cost_code",
+    "work_package_code",
+    "budget_code",
+    "internal_item_code",
+    "work_package_name",
+)
+QTY_LIMIT = Decimal("1e15")  # well inside the Qty column's precision
+QTY_STEP = Decimal("0.000001")  # the Qty column's scale; finer values would be silently rounded
+UNEXPECTED_ERROR = "Unexpected error during sync; see server log"
 
 
 # ---------------------------------------------------------------- pure helpers
@@ -86,21 +100,42 @@ def change_hash(reg: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _validate_row(reg: Any) -> str | None:
-    """Structural problems that make a record unusable; None when the record can be processed."""
+def _is_id(value: Any) -> bool:
+    """A usable identifier: text or an integer (bool is excluded, even though it is an int)."""
+    return isinstance(value, (str, int)) and not isinstance(value, bool)
+
+
+def _validate_row(reg: Any) -> tuple[dict | None, str | None]:
+    """``(clean_row, None)`` when the record can be processed, else ``(None, problem)``.
+
+    Checks presence, type and range, so one malformed record costs one exception instead of aborting the run. The
+    clean row is a copy whose identifiers have been converted to text once; every later step uses that copy.
+    """
     if not isinstance(reg, dict):
-        return "Step 1 register row is not an object"
-    label = reg.get("record_number") or reg.get("inventory_record_id") or "a register record"
-    for key in ("item_id", "inventory_record_id", "record_number"):
+        return None, "Step 1 register row is not an object"
+    number = reg.get("record_number")
+    record_id = reg.get("inventory_record_id")
+    label = number if _is_id(number) and str(number).strip() else record_id if _is_id(record_id) else "a register record"
+    for key in ID_FIELDS:
         value = reg.get(key)
         if value is None or (isinstance(value, str) and not value.strip()):
-            return f"Step 1 record {label} has no {key}"
+            return None, f"Step 1 record {label} has no {key}"
+        if not _is_id(value):
+            return None, f"Step 1 record {label} {key} is not text"
+    for key in TEXT_FIELDS:
+        if not isinstance(reg.get(key), (str, type(None))):
+            return None, f"Step 1 record {label} {key} is not text"
     raw = reg.get("boq_quantity")
     if raw is None:
-        return f"Step 1 record {label} has no quantity"
-    if _parse_quantity(raw) is None:
-        return f"Step 1 record {label} quantity {raw!r} is not a decimal number"
-    return None
+        return None, f"Step 1 record {label} has no quantity"
+    qty = _parse_quantity(raw)
+    if qty is None:
+        return None, f"Step 1 record {label} quantity {raw!r} is not a decimal number"
+    if abs(qty) >= QTY_LIMIT:
+        return None, f"Step 1 record {label} quantity {raw!r} is too large"
+    if qty != qty.quantize(QTY_STEP):
+        return None, f"Step 1 record {label} quantity {raw!r} has more than 6 decimal places"
+    return {**reg, **{key: str(reg[key]) for key in ID_FIELDS}}, None
 
 
 def _source_line_count(reg: dict) -> int | None:
@@ -314,14 +349,16 @@ def _cancelled_note(run: _Run, requirement: Requirement, record_number: str) -> 
 
 def _apply_record(run: _Run, project: Project, step1_project_id: str, reg: dict, index: int) -> None:
     db, p = run.db, run.p
-    problem = _validate_row(reg)
-    if problem:
-        subject = (reg.get("inventory_record_id") if isinstance(reg, dict) else None) or f"{step1_project_id}#{index}"
-        run.exception("VALIDATION", EXC_SUBJECT, str(subject), problem)
+    clean, problem = _validate_row(reg)
+    if clean is None:
+        raw_id = reg.get("inventory_record_id") if isinstance(reg, dict) else None
+        subject = str(raw_id) if _is_id(raw_id) and str(raw_id).strip() else f"{step1_project_id}#{index}"
+        run.exception("VALIDATION", EXC_SUBJECT, subject, problem or "Step 1 register row is unusable")
         return
+    reg = clean
 
-    record_id = str(reg["inventory_record_id"])
-    record_number = str(reg["record_number"])
+    record_id = reg["inventory_record_id"]
+    record_number = reg["record_number"]
     item = see_item(db, p.tenant_id, reg)
     if item.decision == "PENDING":
         run.counts["queued"] += 1
@@ -479,6 +516,11 @@ def _report(run: Step1SyncRun) -> dict:
     return out
 
 
+def failed_run(db: Session, p: Principal, started_at, error: str) -> dict:
+    """Record a FAILED run with no counts and return its report. ``error`` must never carry credentials."""
+    return _report(_finish(db, p, started_at, "FAILED", [], dict.fromkeys(COUNT_KEYS, 0), error=error))
+
+
 def sync(db: Session, p: Principal, client: Step1Client, project_ids: list[str] | None = None) -> dict:
     """Pull the Step 1 register into PCX. ``project_ids`` restricts the run to those PCX project ids. Never commits."""
     started_at = utcnow()
@@ -502,8 +544,7 @@ def sync(db: Session, p: Principal, client: Step1Client, project_ids: list[str] 
             else:
                 plan.append((s1_project, matches[0], None, client.register(str(s1_project["project_id"]))))
     except Step1Unavailable as exc:
-        run = _finish(db, p, started_at, "FAILED", [], dict.fromkeys(COUNT_KEYS, 0), error=str(exc) or "Step 1 unavailable")
-        return _report(run)
+        return failed_run(db, p, started_at, str(exc) or "Step 1 unavailable")
 
     # Apply phase.
     tally = _Run(db, p)
@@ -519,7 +560,7 @@ def sync(db: Session, p: Principal, client: Step1Client, project_ids: list[str] 
             # Dropped records (source_line_count 0) are treated as absent by the change rules, never validated here.
             if isinstance(reg, dict) and _source_line_count(reg) == 0:
                 continue
-            if isinstance(reg, dict) and reg.get("inventory_record_id"):
+            if isinstance(reg, dict) and _is_id(reg.get("inventory_record_id")) and str(reg["inventory_record_id"]).strip():
                 seen_record_ids.add(str(reg["inventory_record_id"]))
             _apply_record(tally, project, step1_project_id, reg, index)
         dropped = _reconcile_dropped(db, p, step1_project_id, seen_record_ids)

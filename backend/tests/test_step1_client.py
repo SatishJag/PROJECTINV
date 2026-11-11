@@ -65,6 +65,21 @@ def test_timeout_raises_unavailable():
     assert "s3cret" not in str(exc.value)
 
 
+def test_non_ascii_password_or_bad_url_raises_unavailable_without_the_password():
+    password = "pässwörd-s3cret"
+    client = HttpStep1Client("http://step1.test/", password, transport=httpx.MockTransport(lambda request: httpx.Response(200, json=[])))
+    with pytest.raises(Step1Unavailable) as exc:
+        client.projects()
+    assert password not in str(exc.value)
+    assert password not in repr(exc.value)
+    assert exc.value.__cause__ is None and exc.value.__suppress_context__
+
+    bad_url = HttpStep1Client("http://step1.test:abc", "s3cret", transport=httpx.MockTransport(lambda request: httpx.Response(200, json=[])))
+    with pytest.raises(Step1Unavailable) as exc:
+        bad_url.projects()
+    assert "s3cret" not in str(exc.value)
+
+
 def test_client_from_settings_is_none_when_unset(monkeypatch):
     monkeypatch.setenv("PCX_STEP1_BASE_URL", "")
     monkeypatch.setenv("PCX_STEP1_APP_PASSWORD", "")

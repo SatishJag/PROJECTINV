@@ -43,6 +43,9 @@ class HttpStep1Client:
                 response = http.get(f"{self._base_url}{path}", params=params, headers=headers)
         except httpx.HTTPError as exc:
             raise Step1Unavailable(f"Step 1 request failed: {type(exc).__name__}") from None
+        except (httpx.InvalidURL, UnicodeError):
+            # Fixed message on purpose: a UnicodeEncodeError from a non-ASCII password carries the password in .object.
+            raise Step1Unavailable("Step 1 request could not be built; check the Step 1 base URL and app password") from None
         if not response.is_success:
             raise Step1Unavailable(f"Step 1 returned HTTP {response.status_code}")
         try:

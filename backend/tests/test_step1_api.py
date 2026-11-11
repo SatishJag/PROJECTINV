@@ -117,3 +117,46 @@ def test_unknown_or_foreign_project_id_is_404_before_any_fetch(client, login, s1
     ok = client.post(f"{BASE}/sync", json={"project_ids": [s1.project.id]}, headers=h)
     assert ok.status_code == 200, ok.text
     assert len(calls) == 1
+
+
+def test_unexpected_error_records_one_generic_failed_run(client, login, s1, fake, monkeypatch, caplog):
+    from app.services import step1_sync
+
+    def explode(db, p, step1, project_ids=None):
+        db.add(Project(tenant_id=p.tenant_id, programme_id=s1.project.programme_id, code="HALF", name="Half-written"))
+        db.flush()
+        raise RuntimeError("boom with detail s3cret")
+
+    monkeypatch.setattr(step1_sync, "sync", explode)
+    h = login("integration@demo.pcx")
+
+    r = client.post(f"{BASE}/sync", json={}, headers=h)
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["state"] == "FAILED"
+    assert body["error"] == "Unexpected error during sync; see server log"
+    assert "s3cret" not in r.text
+    s1.db.expire_all()
+    runs = list(s1.db.scalars(select(Step1SyncRun)))
+    assert len(runs) == 1
+    assert runs[0].state == "FAILED"
+    assert runs[0].error == "Unexpected error during sync; see server log"
+    assert s1.db.scalar(select(func.count()).select_from(Project).where(Project.code == "HALF")) == 0  # rolled back
+    assert "Step 1 sync failed unexpectedly" in caplog.text
+    assert client.get(f"{BASE}/status", headers=h).json()["last_run"]["state"] == "FAILED"
+
+
+def test_domain_errors_from_the_sync_still_propagate(client, login, s1, fake, monkeypatch):
+    from app.core.errors import DomainError
+    from app.services import step1_sync
+
+    def refuse(db, p, step1, project_ids=None):
+        raise DomainError("NOT_FOUND", "Project not found: x", status=404)
+
+    monkeypatch.setattr(step1_sync, "sync", refuse)
+    r = client.post(f"{BASE}/sync", json={}, headers=login("integration@demo.pcx"))
+    assert r.status_code == 404
+    assert r.json()["title"] == "NOT_FOUND"
+    s1.db.expire_all()
+    assert _runs(s1.db) == 0
