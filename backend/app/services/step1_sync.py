@@ -33,7 +33,8 @@ from app.services.step1_items import see_item
 
 SOURCE = "STEP1"
 SOURCE_BOQ_KEY = "STEP1"
-OBJECT_TYPE = "inventory_record"
+OBJECT_TYPE = "inventory_record"  # ExternalObjectLink.object_type only
+EXC_SUBJECT = "step1_record"  # subject_type of every record-level exception (subject_id = inventory_record_id)
 OWNER_ROLE = "ESTIMATOR"
 TITLE_MAX = 300
 COUNT_KEYS = ("created", "revised", "unchanged", "queued", "ignored", "exceptions", "skipped_projects")
@@ -192,7 +193,7 @@ def _apply_record(run: _Run, project: Project, step1_project_id: str, reg: dict,
     problem = _validate_row(reg)
     if problem:
         subject = (reg.get("inventory_record_id") if isinstance(reg, dict) else None) or f"{step1_project_id}#{index}"
-        run.exception("VALIDATION", OBJECT_TYPE, str(subject), problem)
+        run.exception("VALIDATION", EXC_SUBJECT, str(subject), problem)
         return
 
     record_id = str(reg["inventory_record_id"])
@@ -207,25 +208,25 @@ def _apply_record(run: _Run, project: Project, step1_project_id: str, reg: dict,
 
     cls = db.get(EquipmentClass, item.equipment_class_id) if item.equipment_class_id else None
     if cls is None:
-        run.exception("VALIDATION", OBJECT_TYPE, record_id, f"Step 1 item {item.step1_item_id} is LLE but has no equipment class")
+        run.exception("VALIDATION", EXC_SUBJECT, record_id, f"Step 1 item {item.step1_item_id} is LLE but has no equipment class")
         return
     uom = (reg.get("normalized_uom") or "").strip()
     if uom.lower() != "each":
         run.exception(
             "VALIDATION",
-            OBJECT_TYPE,
+            EXC_SUBJECT,
             record_id,
             f"Step 1 record {record_number} uses unit '{uom or 'none'}'; only 'each' can become a requirement",
         )
         return
     qty = _parse_quantity(reg["boq_quantity"])
     if qty <= 0:
-        run.exception("VALIDATION", OBJECT_TYPE, record_id, f"Step 1 record {record_number} quantity {_canonical_quantity(qty)} must be greater than zero")
+        run.exception("VALIDATION", EXC_SUBJECT, record_id, f"Step 1 record {record_number} quantity {_canonical_quantity(qty)} must be greater than zero")
         return
     if cls.tracking == "SERIALIZED" and qty != qty.to_integral_value():
         run.exception(
             "VALIDATION",
-            OBJECT_TYPE,
+            EXC_SUBJECT,
             record_id,
             f"Step 1 record {record_number} quantity {_canonical_quantity(qty)} is fractional, but {cls.name} is tracked by serial number",
         )
@@ -261,7 +262,7 @@ def _apply_record(run: _Run, project: Project, step1_project_id: str, reg: dict,
     except DomainError as exc:
         run.exception(
             "VALIDATION",
-            "step1_record",
+            EXC_SUBJECT,
             record_id,
             f"Step 1 record {record_number} could not become a requirement: {exc.code}: {exc.detail}",
         )
@@ -279,7 +280,7 @@ def _apply_record(run: _Run, project: Project, step1_project_id: str, reg: dict,
         if other is not None:
             run.exception(
                 "VALIDATION",
-                OBJECT_TYPE,
+                EXC_SUBJECT,
                 record_id,
                 f"Step 1 record number {record_number} is already linked to another Step 1 record in this project",
             )
@@ -304,7 +305,7 @@ def _apply_record(run: _Run, project: Project, step1_project_id: str, reg: dict,
     db.flush()
     run.counts["unchanged" if existed else "created"] += 1
     if wbs_problem and not existed:
-        run.exception("MAPPING", "requirement", requirement.id, f"Requirement {requirement.code} (Step 1 {record_number}): {wbs_problem}")
+        run.exception("MAPPING", EXC_SUBJECT, record_id, f"Requirement {requirement.code} (Step 1 {record_number}): {wbs_problem}")
 
 
 def _finish(db: Session, p: Principal, started_at, state: str, projects: list[dict], counts: dict, error: str | None = None) -> Step1SyncRun:

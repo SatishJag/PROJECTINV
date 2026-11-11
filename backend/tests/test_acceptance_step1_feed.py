@@ -96,7 +96,8 @@ def test_not_lle_item_is_ignored(s1):
 
 
 def test_non_each_unit_is_blocked(s1):
-    s1.rows(reg_row(normalized_uom="lot"))
+    reg = reg_row(normalized_uom="lot")
+    s1.rows(reg)
     s1.classify()
     report = s1.sync()
     assert report["counts"]["exceptions"] == 1
@@ -104,6 +105,8 @@ def test_non_each_unit_is_blocked(s1):
     assert s1.requirements() == []
     [exc] = _open_exceptions(s1, "VALIDATION")
     assert "lot" in exc.message
+    assert exc.subject_type == "step1_record"
+    assert exc.subject_id == reg["inventory_record_id"]
 
 
 def test_fractional_quantity_on_serialized_class_is_blocked(s1):
@@ -123,17 +126,20 @@ def test_missing_or_ambiguous_wbs_creates_requirement_with_exception(s1):
     s1.sync()
     [req] = s1.requirements()
     assert req.wbs_id is None
-    assert [e.subject_id for e in _open_exceptions(s1, "MAPPING")] == [req.id]
+    first_id = s1.client.registers["S1-P1"][0]["inventory_record_id"]
+    assert [(e.subject_type, e.subject_id) for e in _open_exceptions(s1, "MAPPING")] == [("step1_record", first_id)]
 
     for code in ("BKK1-S1-A", "BKK1-S1-B"):
         s1.db.add(WbsElement(tenant_id=s1.admin.tenant_id, project_id=s1.project.id, code=code, name=code, cost_code="26-100"))
     s1.db.commit()
-    s1.rows(*s1.client.registers["S1-P1"], reg_row(record_number="INV-00002"))
+    second_reg = reg_row(record_number="INV-00002")
+    s1.rows(*s1.client.registers["S1-P1"], second_reg)
     report = s1.sync()
     assert report["counts"]["created"] == 1
     second = next(r for r in s1.requirements() if r.source_line_key == "INV-00002")
     assert second.wbs_id is None
-    assert second.id in {e.subject_id for e in _open_exceptions(s1, "MAPPING")}
+    mapping = {(e.subject_type, e.subject_id) for e in _open_exceptions(s1, "MAPPING")}
+    assert ("step1_record", second_reg["inventory_record_id"]) in mapping
 
 
 def test_project_without_match_is_skipped(s1):
@@ -185,12 +191,12 @@ def test_long_and_padded_description_becomes_a_clean_title(s1):
 
 
 def test_malformed_rows_raise_exceptions_for_that_record_only(s1):
-    s1.rows(
-        reg_row(),
+    bad = [
         reg_row(record_number="INV-00002", item_id=None),
         reg_row(record_number="INV-00003", boq_quantity=None),
         reg_row(record_number="INV-00004", boq_quantity="abc"),
-    )
+    ]
+    s1.rows(reg_row(), *bad)
     s1.classify()
     report = s1.sync()
     assert report["counts"]["created"] == 1
@@ -198,6 +204,9 @@ def test_malformed_rows_raise_exceptions_for_that_record_only(s1):
     assert report["state"] == "PARTIAL"
     assert [r.source_line_key for r in s1.requirements()] == ["INV-00001"]
     assert s1.db.scalar(select(func.count()).select_from(Requirement).where(Requirement.source_boq_key == "STEP1")) == 1
+    excs = _open_exceptions(s1, "VALIDATION")
+    assert {e.subject_type for e in excs} == {"step1_record"}
+    assert {e.subject_id for e in excs} == {r["inventory_record_id"] for r in bad}
 
 
 def test_requirement_code_collision_is_contained_to_that_record(s1):
