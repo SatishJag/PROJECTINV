@@ -11,7 +11,7 @@ import json
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import Principal
@@ -21,8 +21,10 @@ from app.integrations.step1.client import Step1Client, Step1Unavailable
 from app.models import (
     EquipmentClass,
     ExternalObjectLink,
+    IntegrationException,
     Project,
     Requirement,
+    Step1ItemClass,
     Step1SyncRun,
     WbsElement,
     utcnow,
@@ -529,3 +531,32 @@ def sync(db: Session, p: Principal, client: Step1Client, project_ids: list[str] 
     run = _finish(db, p, started_at, state, projects, tally.counts)
     audit(db, p, "STEP1_SYNC_RUN", "step1_sync_run", run.id, after={"state": state, "counts": tally.counts})
     return _report(run)
+
+
+def _run_dict(run: Step1SyncRun) -> dict:
+    return {
+        "id": run.id,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "actor": run.actor,
+        "state": run.state,
+        "projects_json": list(run.projects_json or []),
+        "counts_json": dict(run.counts_json or {}),
+        "error": run.error,
+    }
+
+
+def list_runs(db: Session, p: Principal, limit: int = 20) -> list[dict]:
+    """Sync runs for the caller's tenant, newest first."""
+    stmt = select(Step1SyncRun).where(Step1SyncRun.tenant_id == p.tenant_id).order_by(Step1SyncRun.started_at.desc(), Step1SyncRun.id.desc()).limit(limit)
+    return [_run_dict(r) for r in db.scalars(stmt)]
+
+
+def status(db: Session, p: Principal, configured: bool) -> dict:
+    """Feed health for the Administration page: last run, items awaiting a decision, open STEP1 exceptions."""
+    last = list_runs(db, p, limit=1)
+    pending = db.scalar(select(func.count()).select_from(Step1ItemClass).where(Step1ItemClass.tenant_id == p.tenant_id, Step1ItemClass.decision == "PENDING"))
+    open_exceptions = db.scalar(
+        select(func.count()).select_from(IntegrationException).where(IntegrationException.tenant_id == p.tenant_id, IntegrationException.source == SOURCE, IntegrationException.state == "OPEN")
+    )
+    return {"configured": configured, "last_run": last[0] if last else None, "pending_items": pending or 0, "open_exceptions": open_exceptions or 0}
