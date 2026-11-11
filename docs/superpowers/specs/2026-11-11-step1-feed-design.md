@@ -46,7 +46,7 @@ Step 1  GET /api/projects                                    (project list, incl
         GET /api/projects/:id/register?includeSuperseded=true (rows incl. those with source_line_count = 0)
    │
    ▼
-PCX  Step1 sync service  (one DB transaction per project; HTTP fetch happens BEFORE the transaction)
+PCX  Step1 sync service  (the whole sync is one DB transaction, stricter than per project; all HTTP fetching happens before any write)
    1. Match project:  Step 1 procore_project_id (and company id, when both sides have it) == PCX Project; no match → skipped, reported
    2. For each register row:
         item gate      step1_item_class: PENDING → queue, nothing created · NOT_LLE → ignore · LLE → continue
@@ -78,7 +78,7 @@ Step 1 items are shared across projects, so one decision covers the item in ever
 
 ### 5.2 New table `step1_sync_run`
 
-`id`, `tenant_id`, `started_at`, `finished_at`, `actor`, `state` (`RUNNING|SUCCEEDED|PARTIAL|FAILED`),
+`id`, `tenant_id`, `started_at`, `finished_at`, `actor`, `state` (`SUCCEEDED|PARTIAL|FAILED`; no `RUNNING`, because the run is a single transaction),
 `projects_json` (per-project result), `counts_json` (`created`, `revised`, `unchanged`, `queued`, `ignored`,
 `exceptions`, `skipped_projects`), `error` (text, for FAILED).
 
@@ -94,6 +94,7 @@ Step 1 items are shared across projects, so one decision covers the item in ever
 - **`Requirement`**: `source_boq_key = "STEP1"`, `source_line_key` = Step 1 `record_number` (e.g. `INV-00012`).
   The existing `(project, source_boq_key, source_line_key)` de-duplication in `create_requirement` then makes
   creation replay-safe.
+- **`Requirement.step1_item_id`** (nullable, indexed) records the Step 1 item so §6.4 and §6.3 can find a crosswalk item's requirements.
 
 ### 5.4 Class suggestion
 
@@ -172,7 +173,7 @@ in-memory fake for tests, the same pattern as the Procore simulator.
   Confirm / choose another class / "Not long-lead"). Shows how many requirements each decision covers.
 - **Administration → "Step 1" page:** connection status, *Sync now*, last run counts, run history, link to the
   exceptions screen filtered to `STEP1`.
-- **Requirement detail:** a "Source: Step 1 · INV-00012" badge, linking to the register record in Step 1.
+- **Requirement detail:** a "Source: Step 1 · INV-00012" badge. The badge is text only (Step 1 has no stable per-record URL).
 - The nav and capability map (`auth/permissions.ts`) get the two new entries. Tables and forms use the existing
   primitives, semantic tables and labelled inputs.
 
@@ -180,7 +181,7 @@ in-memory fake for tests, the same pattern as the Procore simulator.
 
 | Case | Behaviour |
 |---|---|
-| Step 1 unreachable, timeout, 401, non-JSON | run `FAILED`, nothing written, UI shows the age of the last good run |
+| Step 1 unreachable, timeout, 401, non-JSON | the API returns 200 with `state: "FAILED"` and a stored FAILED run row; nothing else is written; UI shows the age of the last good run. The whole sync is one DB transaction (stricter than per project); all HTTP fetching happens before any write |
 | One bad record | exception for that record; the rest of the project still syncs; run `PARTIAL` |
 | No matching PCX project | skipped, listed in the run report |
 | WBS missing or ambiguous | requirement created with `wbs_id` null + `MAPPING` exception |

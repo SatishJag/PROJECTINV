@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     procore_redirect_uri: str = "http://localhost:8000/api/integrations/procore/oauth/callback"
     procore_webhook_secret: str = ""
 
+    # Step 1 register (separate Node app) that PCX pulls its BOQ register from. Empty base URL = not configured.
+    step1_base_url: str = ""
+    step1_app_password: str = ""
+
     # Origins allowed to frame the UI (Procore embedded Full Screen / Side Panel apps).
     frame_ancestors: str = "'self' https://app.procore.com https://us02.procore.com https://uk01.procore.com https://sandbox.procore.com"
 

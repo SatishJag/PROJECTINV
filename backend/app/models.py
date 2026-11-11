@@ -218,6 +218,7 @@ class Requirement(TenantScoped, Versioned, Base):
     state: Mapped[str] = mapped_column(String(20), default="ACTIVE")  # ACTIVE|CANCELLED
     source_boq_key: Mapped[str | None] = mapped_column(String(120))
     source_line_key: Mapped[str | None] = mapped_column(String(120))
+    step1_item_id: Mapped[str | None] = mapped_column(String(64), index=True)  # Step 1 register item this came from
 
 
 class RequirementRevision(TenantScoped, Base):
@@ -1069,7 +1070,7 @@ class ExternalObjectLink(TenantScoped, Versioned, Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "platform", "company_key", "object_type", "object_key", "link_role"),
     )
-    platform: Mapped[str] = mapped_column(String(20))  # PROCORE|ORACLE|GEP|PLANON
+    platform: Mapped[str] = mapped_column(String(20))  # PROCORE|ORACLE|GEP|PLANON|STEP1
     company_key: Mapped[str] = mapped_column(String(64), default="")
     project_key: Mapped[str | None] = mapped_column(String(64))
     object_type: Mapped[str] = mapped_column(String(60))  # project|vendor|purchase_order_contract|cost_code|document|equipment
@@ -1080,6 +1081,36 @@ class ExternalObjectLink(TenantScoped, Versioned, Base):
     source_revision: Mapped[str | None] = mapped_column(String(80))
     sync_state: Mapped[str] = mapped_column(String(20), default="LINKED")  # LINKED|PENDING|APPLIED|REJECTED|NEEDS_REVIEW
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class Step1ItemClass(TenantScoped, Versioned, Base):
+    """Crosswalk from a Step 1 register item to a PCX equipment class, with the long-lead (LLE) decision."""
+
+    __tablename__ = "step1_item_class"
+    __table_args__ = (UniqueConstraint("tenant_id", "step1_item_id"),)
+    step1_item_id: Mapped[str] = mapped_column(String(64))
+    internal_item_code: Mapped[str | None] = mapped_column(String(80))
+    description: Mapped[str] = mapped_column(Text)
+    suggested_class_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("equipment_class.id"))
+    decision: Mapped[str] = mapped_column(String(20), default="PENDING")  # PENDING|LLE|NOT_LLE
+    equipment_class_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("equipment_class.id"))
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    decided_by: Mapped[str | None] = mapped_column(String(120))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class Step1SyncRun(TenantScoped, Base):
+    """One pull from Step 1 (single transaction). state: SUCCEEDED|PARTIAL|FAILED."""
+
+    __tablename__ = "step1_sync_run"
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    actor: Mapped[str] = mapped_column(String(120))
+    state: Mapped[str] = mapped_column(String(20))
+    projects_json: Mapped[list] = mapped_column(JSON, default=list)
+    counts_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
 
 
 class OutboxMessage(TenantScoped, Base):

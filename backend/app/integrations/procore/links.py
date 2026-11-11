@@ -6,6 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.commands import bump
+from app.integrations.exceptions import auto_resolve as _auto_resolve
+from app.integrations.exceptions import open_exception as _open_exception
 from app.models import ExternalObjectLink, IntegrationException, ProcoreConnection, utcnow
 
 PLATFORM = "PROCORE"
@@ -124,43 +126,10 @@ def upsert_link(
 
 def open_exception(db: Session, tenant_id: str, *, kind: str, subject_type: str, subject_id: str, message: str, owner_role: str = "INTEGRATION") -> IntegrationException:
     """One OPEN exception per (kind, subject); re-raising refreshes the message instead of duplicating."""
-    exc = db.scalar(
-        select(IntegrationException).where(
-            IntegrationException.tenant_id == tenant_id,
-            IntegrationException.source == SOURCE,
-            IntegrationException.kind == kind,
-            IntegrationException.subject_type == subject_type,
-            IntegrationException.subject_id == subject_id,
-            IntegrationException.state == "OPEN",
-        )
+    return _open_exception(
+        db, tenant_id, source=SOURCE, actor="procore-sync", kind=kind, subject_type=subject_type, subject_id=subject_id, message=message, owner_role=owner_role
     )
-    if exc:
-        if exc.message != message:
-            exc.message = message
-            bump(exc)
-        return exc
-    exc = IntegrationException(
-        tenant_id=tenant_id, created_by="procore-sync", source=SOURCE, kind=kind, subject_type=subject_type, subject_id=subject_id, message=message, owner_role=owner_role
-    )
-    db.add(exc)
-    db.flush()
-    return exc
 
 
 def auto_resolve(db: Session, tenant_id: str, *, kind: str, subject_type: str, subject_id: str, resolution: str) -> int:
-    n = 0
-    for exc in db.scalars(
-        select(IntegrationException).where(
-            IntegrationException.tenant_id == tenant_id,
-            IntegrationException.source == SOURCE,
-            IntegrationException.kind == kind,
-            IntegrationException.subject_type == subject_type,
-            IntegrationException.subject_id == subject_id,
-            IntegrationException.state == "OPEN",
-        )
-    ):
-        exc.state = "RESOLVED"
-        exc.resolution = resolution
-        bump(exc)
-        n += 1
-    return n
+    return _auto_resolve(db, tenant_id, source=SOURCE, kind=kind, subject_type=subject_type, subject_id=subject_id, resolution=resolution)
