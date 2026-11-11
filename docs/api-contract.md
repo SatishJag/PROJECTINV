@@ -187,10 +187,10 @@ PCX pulls the BOQ register from the separate Step 1 app on demand and turns long
 
 **How it works:**
 - Step 1 items are shared across projects. An estimator or engineer decides once per item whether it is long-lead (`LLE`, with a PCX equipment class) or not (`NOT_LLE`). New items start as `PENDING`; the crosswalk may carry a `suggested_class_id`.
-- A sync fetches every Step 1 project and its register, then matches each Step 1 project to a PCX project on `procore_project_id` (and on `procore_company_id` too when both sides have one). Records of `LLE` items create a requirement with `source_boq_key = "STEP1"` and `source_line_key` = the Step 1 `record_number`, `step1_item_id` set, and a **DRAFT** revision 1. `wbs_id` is set when exactly one WBS element in the project has the record's cost code; otherwise it stays `null` and a `MAPPING` exception is raised.
+- A sync fetches the list of Step 1 projects and matches each one to a PCX project on `procore_project_id` (and on `procore_company_id` too when both sides have one). It then fetches the register only for the Step 1 projects that matched exactly one PCX project the caller can see (and, when `project_ids` is given, only for those). Records of `LLE` items create a requirement with `source_boq_key = "STEP1"` and `source_line_key` = the Step 1 `record_number`, `step1_item_id` set, and a **DRAFT** revision 1. `wbs_id` is set when exactly one WBS element in the project has the record's cost code; otherwise it stays `null` and a `MAPPING` exception is raised.
 - A later change to the record creates a new DRAFT revision (an open DRAFT or IN_REVIEW revision is cancelled and replaced; fields entered in PCX are carried over). A sync **never approves** a revision, never edits an approved or superseded one, and never cancels a requirement.
 - Only `normalized_uom = "each"` is accepted (stored as `EA`). Quantities are exact decimal strings. A serialized class needs a whole-number quantity above zero.
-- A bad record raises an `IntegrationException` (source `STEP1`, owner role `ESTIMATOR`; kinds `VALIDATION`, `MAPPING`, `RECONCILIATION`) and the rest still sync. The whole run is one transaction; all HTTP fetching happens before the first write.
+- A bad record raises an `IntegrationException` (source `STEP1`, owner role `ESTIMATOR`; kinds `VALIDATION`, `MAPPING`, `RECONCILIATION`) and the rest still sync. The whole run is one transaction; all HTTP fetching happens before the first write. A record is a `VALIDATION` exception when `item_id`, `inventory_record_id` or `record_number` is missing or is not text or an integer, when a text field (`item_description`, `specification`, `normalized_uom`, `cost_code`, `work_package_code`, `budget_code`, `internal_item_code`, `work_package_name`) is not text or null, or when the quantity is not a decimal, is 1e15 or more, or has more than 6 decimal places. An open `VALIDATION` exception is resolved "No longer applicable" when the item is later classified `NOT_LLE` or the linked record disappears from Step 1.
 
 | Method and path | Roles | Body / query | Returns |
 |---|---|---|---|
@@ -202,10 +202,10 @@ PCX pulls the BOQ register from the separate Step 1 app on demand and turns long
 
 `{id}` in `/items/{id}/classify` is the crosswalk row's `id`, not `step1_item_id`. Supplier principals are blocked from every route (`require_internal`).
 
-**Crosswalk row** (`GET /items`, classify response): `{id, step1_item_id, internal_item_code, description, suggested_class_id, suggested_class_name, decision, equipment_class_id, decision_reason, decided_by, decided_at, last_seen_at, requirement_count, version, etag, created_at, updated_at}`. `requirement_count` counts live (not cancelled) requirements fed from the item.
+**Crosswalk row** (`GET /items`, classify response): `{id, step1_item_id, internal_item_code, description, suggested_class_id, suggested_class_name, decision, equipment_class_id, decision_reason, decided_by, decided_at, last_seen_at, requirement_count, version, etag, created_by, created_at, updated_at}`. `requirement_count` counts live (not cancelled) requirements fed from the item.
 
 **Classify rules:**
-- `LLE` needs `equipment_class_id`, an existing, non-component class in the caller's tenant (422 `VALIDATION` otherwise, nothing changes). `reason` is optional.
+- `LLE` needs `equipment_class_id`, an existing, non-component class in the caller's tenant (422 `VALIDATION` otherwise, nothing changes). `reason` is optional. `equipment_class_id` and `reason` must be strings (422 `VALIDATION` otherwise).
 - `NOT_LLE` needs `reason`. Live requirements are not cancelled; each gets a `RECONCILIATION` exception asking an estimator to decide whether to cancel it.
 - Changing the class of an item that already has live requirements returns 409 `CLASS_IN_USE`. Cancel or move the requirements first.
 - Classifying never creates requirements. They are created or revised by the next sync.
@@ -236,7 +236,7 @@ PCX pulls the BOQ register from the separate Step 1 app on demand and turns long
 - `STEP1_NOT_CONFIGURED` (409): `POST /sync` with the base URL or password unset. Role is checked first, so a non-INTEGRATION user gets 403 `FORBIDDEN`.
 - `CLASS_IN_USE` (409): see the classify rules.
 - 404 `NOT_FOUND`: an unknown, cross-tenant or out-of-scope id in `project_ids` (checked before anything is fetched or written), or an unknown crosswalk row id.
-- **A FAILED run returns HTTP 200**, not an error status: Step 1 unreachable, timed out, 401, or a non-JSON response give `state: "FAILED"`, an `error` message and a stored FAILED run row. Nothing else was written. The error message never contains the password.
+- **A FAILED run returns HTTP 200**, not an error status: Step 1 unreachable, timed out, 401, or a non-JSON response give `state: "FAILED"`, an `error` message and a stored FAILED run row. Nothing else was written. The error message never contains the password. An unexpected server error during the sync is also recorded as one FAILED run (HTTP 200) with the generic error "Unexpected error during sync; see server log"; the detail goes to the server log only, and nothing else is written.
 - **A FAILED outcome is replayed under the same `Idempotency-Key`** like any other stored response. After an outage, retry with a **fresh** key, or the same failure comes back without contacting Step 1.
 - `GET /status` and `GET /runs` are scoped to the **tenant**, not to the caller's projects. `projects_json` can therefore list Step 1 projects the caller cannot see in PCX.
 

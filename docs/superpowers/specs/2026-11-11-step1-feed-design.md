@@ -1,6 +1,6 @@
 # Step 1 → PCX feed — design
 
-**Status:** draft for review · **Date:** 2026-11-11
+**Status:** approved; implemented · **Date:** 2026-11-11
 **Part of:** Phase 1, piece 1 of 3 (1 Step 1 feed → 2 approval correctness → 3 benchmark & reuse correctness).
 **Governing spec:** `docs/spec/PCX-PRD-001-product-specification.md` (FR01, FR02, B01.2, B01.3.3).
 

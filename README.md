@@ -10,7 +10,7 @@ write-back path. Unknown values stay unknown — never zero.
 
 - Backend: Python 3.14 · FastAPI · SQLAlchemy 2 · SQLite (WAL, foreign keys)
 - Frontend: React 19 · Vite 7 · TypeScript (strict) · Tailwind 4 · TanStack Query 5 · Radix UI
-- Tests: 85 pytest cases (35 for acceptance criteria T01–T28, the rest for the Step 1 feed)
+- Tests: 96 pytest cases (35 for acceptance criteria T01–T28, the rest for the Step 1 feed)
 
 ---
 

@@ -30,7 +30,7 @@ PCX backend (run from `backend/`):
 python -m pip install -r requirements.txt
 python -m app.seed            # rebuilds data/pcx.db with the BKK demo; --reference-only for master data only
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-python -m pytest -q           # expect 85 passed
+python -m pytest -q           # expect 96 passed
 ```
 Step 1 feed config (backend env): `PCX_STEP1_BASE_URL` and `PCX_STEP1_APP_PASSWORD`; unset means `/status` reports `configured: false` and `/sync` returns 409 `STEP1_NOT_CONFIGURED`.
 PCX web (from `web/`): `npm ci` · `npm run typecheck` · `npm run build` (served by the backend from `web/dist`) ·
@@ -106,15 +106,13 @@ The table below covers spec features the tests don't fully exercise.
    - README says Python 3.14 (3.13 works) and lists a nonexistent `backend/app/domain/`.
    - The `httpx` test client is deprecated; replace it.
    - OCR for scanned BOQ PDFs (Step 1 refuses them today).
-10. Step 1 feed follow-ups:
-   - `GET /api/integrations/step1/status` should expose the age of the last **good** run (spec §10). It returns only the latest run, so after a FAILED run the page cannot say how stale the data is.
-   - Small deferred items from review (no test or minor hardening): the client catches only `httpx.HTTPError` (not `InvalidURL` or `UnicodeError`); a non-string `item_description` or `normalized_uom` from Step 1 would abort the whole run; `project_ids: []` is accepted as a no-op run; replacing an unapproved DRAFT revision 1 and the MAPPING-stays-open branch have no test. The full list is in the (uncommitted) SDD ledger `.superpowers/sdd/2026-11-11-step1-feed/progress.md`.
-   - Nothing here has run against a live Procore tenant or a deployed Step 1; only the local demo server (see the status log).
+10. Step 1 feed follow-ups: the deferred review findings are listed in `docs/superpowers/step1-feed-followups.md`. Nothing in the feed has run against a live Procore tenant or a deployed Step 1; only the local demo server (see the status log).
 
 ## Status log
 
 Newest first. Add one line per meaningful change.
 
+- **2026-11-11** — Final whole-branch review of the Step 1 feed and one fix wave: a malformed register record (wrong type, quantity ≥ 1e15 or more than 6 decimals) now costs one `VALIDATION` exception instead of aborting the run; `POST /sync` records an unexpected error as one FAILED run with a generic message; the Step 1 client turns a bad base URL or non-ASCII password into `Step1Unavailable` without leaking it; `/status` adds `last_good_run` and the admin page shows "Last good sync: <age>"; stale `VALIDATION` exceptions close when an item becomes `NOT_LLE` or a record is dropped; classify rejects non-text class ids and reasons with 422; new tests pin DRAFT-revision-1 replacement and the project-scope branch. Remaining nits moved to `docs/superpowers/step1-feed-followups.md`. Verified: PCX 96 pytest, web typecheck and build clean.
 - **2026-11-11** — Step 1 → PCX feed built and verified (tasks 1–9 of the plan). New: settings `PCX_STEP1_BASE_URL` / `PCX_STEP1_APP_PASSWORD`, tables `step1_item_class` and `step1_sync_run`, `Requirement.step1_item_id`, services `step1_items.py` and `step1_sync.py`, routes under `/api/integrations/step1`, shared `integrations/exceptions.py`, web pages `/admin/step1` and `/planning/step1-items`. Docs: `docs/api-contract.md` "Step 1 feed", README. Verified: PCX 85 pytest (35 original + 50 new), web typecheck and build clean, Step 1 18/18. End to end against a real local Step 1 demo server (`PROCORE_MODE=demo`, `BC1_MEP_BOQ_RevA.xlsx` uploaded to Bangkok Central 1, 8 register rows): first sync `queued 8, created 0`; after classifying, `created 3` (2 MAPPING exceptions, no WBS element for 26-200 / 26-400; the chiller got `wbs_id` from a hand-added 26-100 element); third sync `unchanged 3, created 0`. A FAILED run (Step 1 down) returned HTTP 200 with `state: "FAILED"` and the page showed it. Not covered live: a `revised` run (RevB only changes a non-LLE item) and any real Procore tenant.
 - **2026-11-11** — Spec approved; wrote the implementation plan for piece 1 in `docs/superpowers/plans/2026-11-11-step1-feed.md` (9 tasks, tests first; awaiting review and an execution-method choice; no code yet). The plan amends the spec in five places (e.g. `Requirement.step1_item_id`, one transaction per run).
 - **2026-11-11** — Phase 1 agreed (Step 1 feed → approval correctness → benchmark/reuse correctness; substitution, FX/inflation and scheduled sync are Phase 2). Wrote the design for piece 1 in `docs/superpowers/specs/2026-11-11-step1-feed-design.md` (awaiting review; no code yet). Built a code graph of the repo with graphify (2,150 nodes, 83 communities) to check the blast radius; the output is generated, not committed.
