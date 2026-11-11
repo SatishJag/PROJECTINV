@@ -23,6 +23,7 @@ from app.api import (
     quality,
     reference,
     sourcing,
+    step1,
 )
 from app.config import get_settings
 from app.core.errors import DomainError, domain_error_handler
@@ -81,7 +82,7 @@ def create_app() -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-    for module in (auth, reference, dashboard, planning, sourcing, procurement, inventory, assets, quality, logistics, handbook, costs, integrations):
+    for module in (auth, reference, dashboard, planning, sourcing, procurement, inventory, assets, quality, logistics, handbook, costs, integrations, step1):
         app.include_router(module.router)
 
     @app.get("/api/health")
