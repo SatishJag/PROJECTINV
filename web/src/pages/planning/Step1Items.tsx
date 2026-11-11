@@ -166,7 +166,7 @@ function NotLongLeadDialog({ item, onClose }: { item: Step1Item; onClose: () => 
       confirmLabel="Mark as not long-lead"
       reason={{ label: 'Reason', required: true, placeholder: 'Why this item is not long-lead', hint: 'Recorded in the audit trail.' }}
       run={(reason) => step1.classify(item.id, { decision: 'NOT_LLE', reason }, { ifMatch: item.etag })}
-      invalidate={[['step1']]}
+      invalidate={[['step1'], ['integrations']]}
       success="Classified as not long-lead"
     />
   )

@@ -23,7 +23,7 @@ export function Step1Admin() {
 
   const sync = useCommand({
     run: () => step1.sync(),
-    invalidate: [['step1'], ['integrations']],
+    invalidate: [['step1'], ['integrations'], ['planning']],
     onSuccess: (r) => {
       setReport(r)
       const c = r.counts
