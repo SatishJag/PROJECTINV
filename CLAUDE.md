@@ -106,6 +106,7 @@ The table below covers spec features the tests don't fully exercise.
 
 Newest first. Add one line per meaningful change.
 
+- **2026-11-11** — Spec approved; wrote the implementation plan for piece 1 in `docs/superpowers/plans/2026-11-11-step1-feed.md` (9 tasks, tests first; awaiting review and an execution-method choice; no code yet). The plan amends the spec in five places (e.g. `Requirement.step1_item_id`, one transaction per run).
 - **2026-11-11** — Phase 1 agreed (Step 1 feed → approval correctness → benchmark/reuse correctness; substitution, FX/inflation and scheduled sync are Phase 2). Wrote the design for piece 1 in `docs/superpowers/specs/2026-11-11-step1-feed-design.md` (awaiting review; no code yet). Built a code graph of the repo with graphify (2,150 nodes, 83 communities) to check the blast radius; the output is generated, not committed.
 - **2026-11-06** — Audited PCX against PRD 001. Saved the spec to `docs/spec/`. Created this file. Verified: PCX 35/35 pytest, web typecheck clean; Step 1 18/18 tests, typecheck and build clean.
 - **2026-11-06** — PR #1 merged: Step 1 register added in `step1-register/`.
