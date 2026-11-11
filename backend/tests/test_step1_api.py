@@ -62,6 +62,7 @@ def test_status_and_runs_reflect_the_last_sync(client, login, s1, fake):
     empty = client.get(f"{BASE}/status", headers=h).json()
     assert empty["configured"] is True
     assert empty["last_run"] is None
+    assert empty["last_good_run"] is None
     assert empty["pending_items"] == 0
 
     first = client.post(f"{BASE}/sync", json={}, headers=h).json()
@@ -72,7 +73,8 @@ def test_status_and_runs_reflect_the_last_sync(client, login, s1, fake):
     assert status["last_run"]["state"] == "SUCCEEDED"
     assert status["pending_items"] == 1
     assert status["open_exceptions"] == 0
-    assert set(status) == {"configured", "last_run", "pending_items", "open_exceptions"}
+    assert status["last_good_run"]["id"] == second["run_id"]
+    assert set(status) == {"configured", "last_run", "last_good_run", "pending_items", "open_exceptions"}
 
     runs = client.get(f"{BASE}/runs", headers=h).json()
     assert [r["id"] for r in runs] == [second["run_id"], first["run_id"]]
@@ -184,3 +186,25 @@ def test_project_outside_the_callers_scope_is_404_or_skipped(client, login, s1, 
     assert entry["pcx_project_id"] is None
     assert "scope" in entry["reason"]
     assert r.json()["counts"]["skipped_projects"] == 1
+
+
+def test_last_good_run_survives_a_failed_run(client, login, s1, fake):
+    h = login("integration@demo.pcx")
+    fake.fail = True
+    client.post(f"{BASE}/sync", json={}, headers=h)
+    only_failed = client.get(f"{BASE}/status", headers=h).json()
+    assert only_failed["last_run"]["state"] == "FAILED"
+    assert only_failed["last_good_run"] is None
+
+    fake.fail = False
+    good = client.post(f"{BASE}/sync", json={}, headers=h).json()
+    assert good["state"] == "SUCCEEDED"
+    fake.fail = True
+    failed = client.post(f"{BASE}/sync", json={}, headers=h).json()
+    assert failed["state"] == "FAILED"
+
+    status = client.get(f"{BASE}/status", headers=h).json()
+    assert status["last_run"]["id"] == failed["run_id"]
+    assert status["last_good_run"]["id"] == good["run_id"]
+    assert status["last_good_run"]["state"] == "SUCCEEDED"
+    assert status["last_good_run"]["finished_at"]

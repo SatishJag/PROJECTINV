@@ -36,6 +36,8 @@ export function Step1Admin() {
   const data = status.data
   const last = data?.last_run ?? null
   const failure = report?.state === 'FAILED' ? report.error : last?.state === 'FAILED' ? last.error : null
+  const good = data?.last_good_run ?? null
+  const goodAge = good ? (relativeAge(good.finished_at ?? good.started_at) ?? 'time not recorded') : null
 
   return (
     <>
@@ -64,7 +66,8 @@ export function Step1Admin() {
           ) : null}
           {failure ? (
             <Callout className="mb-4" tone="danger" title="Last sync failed">
-              {failure}
+              <p>{failure}</p>
+              <p className="mt-1">{goodAge ? `Last good sync: ${goodAge}` : 'No successful sync yet'}</p>
             </Callout>
           ) : null}
 

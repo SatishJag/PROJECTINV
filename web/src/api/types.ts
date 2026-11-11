@@ -1085,6 +1085,8 @@ export interface Step1Run {
 export interface Step1Status {
   configured: boolean
   last_run: Step1Run | null
+  /** Latest run that did not fail (SUCCEEDED or PARTIAL); null when no sync has ever succeeded. */
+  last_good_run: Step1Run | null
   pending_items: number
   open_exceptions: number
 }

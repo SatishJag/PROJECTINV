@@ -593,17 +593,28 @@ def _run_dict(run: Step1SyncRun) -> dict:
     }
 
 
+def _newest_runs(p: Principal):
+    return select(Step1SyncRun).where(Step1SyncRun.tenant_id == p.tenant_id).order_by(Step1SyncRun.started_at.desc(), Step1SyncRun.id.desc())
+
+
 def list_runs(db: Session, p: Principal, limit: int = 20) -> list[dict]:
     """Sync runs for the caller's tenant, newest first."""
-    stmt = select(Step1SyncRun).where(Step1SyncRun.tenant_id == p.tenant_id).order_by(Step1SyncRun.started_at.desc(), Step1SyncRun.id.desc()).limit(limit)
-    return [_run_dict(r) for r in db.scalars(stmt)]
+    return [_run_dict(r) for r in db.scalars(_newest_runs(p).limit(limit))]
 
 
 def status(db: Session, p: Principal, configured: bool) -> dict:
-    """Feed health for the Administration page: last run, items awaiting a decision, open STEP1 exceptions."""
+    """Feed health for the Administration page: last run, last good (not FAILED) run, items awaiting a decision, open
+    STEP1 exceptions."""
     last = list_runs(db, p, limit=1)
+    good = db.scalar(_newest_runs(p).where(Step1SyncRun.state != "FAILED").limit(1))
     pending = db.scalar(select(func.count()).select_from(Step1ItemClass).where(Step1ItemClass.tenant_id == p.tenant_id, Step1ItemClass.decision == "PENDING"))
     open_exceptions = db.scalar(
         select(func.count()).select_from(IntegrationException).where(IntegrationException.tenant_id == p.tenant_id, IntegrationException.source == SOURCE, IntegrationException.state == "OPEN")
     )
-    return {"configured": configured, "last_run": last[0] if last else None, "pending_items": pending or 0, "open_exceptions": open_exceptions or 0}
+    return {
+        "configured": configured,
+        "last_run": last[0] if last else None,
+        "last_good_run": _run_dict(good) if good is not None else None,
+        "pending_items": pending or 0,
+        "open_exceptions": open_exceptions or 0,
+    }

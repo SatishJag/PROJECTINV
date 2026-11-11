@@ -194,7 +194,7 @@ PCX pulls the BOQ register from the separate Step 1 app on demand and turns long
 
 | Method and path | Roles | Body / query | Returns |
 |---|---|---|---|
-| GET `/status` | any internal user | | `{configured, last_run: run\|null, pending_items, open_exceptions}`. `last_run` is the latest run of any state, not the last good one |
+| GET `/status` | any internal user | | `{configured, last_run: run\|null, last_good_run: run\|null, pending_items, open_exceptions}`. `last_run` is the latest run of any state; `last_good_run` is the latest run that is not `FAILED` (`null` when none has succeeded), so the UI can show the age of the last good sync |
 | GET `/runs?limit=` | any internal user | `limit` 1–100, default 20 | run rows, newest first |
 | POST `/sync` | INTEGRATION, ADMIN | `{project_ids?: [pcx project id]}`; omit or `null` for every matching project. Accepts `Idempotency-Key` | sync report (below) |
 | GET `/items?decision=` | any internal user | `decision` is `PENDING`, `LLE` or `NOT_LLE`; omit for all (422 `VALIDATION` otherwise) | crosswalk rows, ordered by description |
@@ -230,7 +230,7 @@ PCX pulls the BOQ register from the separate Step 1 app on demand and turns long
 - A Step 1 project with no matching PCX project, several matching PCX projects, or a match outside the caller's project scope is `skipped` with a `reason`.
 - A record that disappears from Step 1 raises a `RECONCILIATION` exception; the requirement stays `ACTIVE`. The exception resolves itself when the record returns.
 
-**Run row** (`GET /runs`, and `last_run` in `/status`): `{id, started_at, finished_at, actor, state, projects_json, counts_json, error}`. `projects_json` and `counts_json` have the shapes of `projects` and `counts` above. `error` is null unless the run is `FAILED`.
+**Run row** (`GET /runs`, and `last_run` / `last_good_run` in `/status`): `{id, started_at, finished_at, actor, state, projects_json, counts_json, error}`. `projects_json` and `counts_json` have the shapes of `projects` and `counts` above. `error` is null unless the run is `FAILED`.
 
 **Errors and idempotency:**
 - `STEP1_NOT_CONFIGURED` (409): `POST /sync` with the base URL or password unset. Role is checked first, so a non-INTEGRATION user gets 403 `FORBIDDEN`.
